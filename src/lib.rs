@@ -1,5 +1,5 @@
 //! Provides an [`Actor`] and (de)serializable [`Token`] struct which support authenticating
-//! Javascript Web Tokens with a custom payload. See [jwt.io](http://jwt.io) for more information
+//! JSON Web Tokens with a custom payload. See [jwt.io](http://jwt.io) for more information
 //! on the JWT spec.
 //!
 //! The provided [`Actor`] uses the

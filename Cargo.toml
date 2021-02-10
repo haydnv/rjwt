@@ -1,9 +1,9 @@
 [package]
 name = "rjwt"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["haydnv"]
 edition = "2018"
-description = "A recursive Javascript Web Token"
+description = "A recursive JSON Web Token, part of Tinychain: https://git.io/JtryR"
 license = "Apache-2.0"
 repository = "http://github.com/haydnv/rjwt.git"
 
