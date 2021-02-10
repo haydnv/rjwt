@@ -3,15 +3,15 @@ name = "rjwt"
 version = "0.1.0"
 authors = ["haydnv"]
 edition = "2018"
-description = "Recursive Javascript Web Token, part of Tinychain: https://git.io/JtryR"
+description = "A generic Javascript Web Token"
 license = "Apache-2.0"
 repository = "http://github.com/haydnv/rjwt.git"
 
-keywords = ["oauth", "jwt", "recursive", "scope"]
+keywords = ["oauth", "jwt", "scope"]
 categories = ["authentication", "web-programming"]
 
 [dependencies]
-base64 = "0.12"
+base64 = "0.13"
 ed25519-dalek = "1.0"
 rand = "0.7"
 serde = { version = "1.0", features = ["derive"] }

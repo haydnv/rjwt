@@ -100,6 +100,7 @@ impl fmt::Display for Error {
 /// The result of a [`Token`] operation.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// A Javascript Web Token.
 #[derive(Deserialize, Serialize)]
 pub struct Token<I, C> {
     iss: String,
@@ -146,8 +147,8 @@ impl<I, C> Token<I, C> {
         &self.actor_id
     }
 
-    /// Returns Ok(false) if the token is expired, Err if it contains nonsensical time data
-    /// (like a negative timestamp or a future issue time), or Ok(true) if the token could
+    /// Returns `Ok(false)` if the token is expired, `Err` if it contains nonsensical time data
+    /// (like a negative timestamp or a future issue time), or `Ok(true)` if the token could
     /// be valid at the given moment.
     pub fn expired(&self, now: SystemTime) -> Result<bool> {
         let iat = UNIX_EPOCH + Duration::from_secs(self.iat);
