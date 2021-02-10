@@ -8,25 +8,50 @@
 //!
 //! Example:
 //! ```
-//! use std::time::{Duration, SystemTime};
-//! use rjwt::{Actor, Token};
+//! # use std::collections::HashMap;
+//! # use std::time::{Duration, SystemTime};
+//! # use futures::executor::block_on;
+//! # use async_trait::async_trait;
+//! # use rjwt::*;
 //!
-//! type Claims = ();
+//! struct Resolver {
+//!     actors: HashMap<String, Actor<String>>,
+//! }
 //!
-//! let actor1 = Actor::new("actor1".to_string());
-//! let actor2 = Actor::new("actor2".to_string());
+//! #[async_trait]
+//! impl Resolve for Resolver {
+//!     type Host = String;
+//!     type ActorId = String;
+//!     type Claims = ();
+//!
+//!     async fn resolve(
+//!         &self,
+//!         _host: &Self::Host,
+//!         actor_id: &Self::ActorId
+//!     ) -> Result<Actor<Self::ActorId>> {
+//!         self
+//!             .actors
+//!             .get(actor_id)
+//!             .cloned()
+//!             .ok_or_else(|| Error::new(ErrorKind::Fetch, actor_id))
+//!     }
+//! }
+//!
+//! let actor = Actor::new("actor1".to_string());
+//! let resolver = Resolver {
+//!     actors: vec![("actor1".to_string(), actor.clone())].into_iter().collect()
+//! };
 //!
 //! let token = Token::new(
 //!     "example.com".to_string(),
-//!     SystemTime::now(), Duration::from_secs(30),
-//!     actor1.id().to_string(),
+//!     SystemTime::now(),
+//!     Duration::from_secs(30),
+//!     actor.id().to_string(),
 //!     ());
 //!
-//! let encoded = actor1.sign_token(&token).unwrap();
-//! let decoded: Token<String, Claims> = actor1.validate(&encoded).unwrap();
+//! let encoded = actor.sign_token(&token).unwrap();
+//! let decoded = block_on(resolver.validate(&encoded)).unwrap();
 //! assert_eq!(token, decoded);
-//! assert!(actor2.validate::<Claims>(&encoded).is_err());
-//! println!("encoded size is {}", encoded.len());
 //! ```
 //!
 
@@ -34,17 +59,95 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use rand::rngs::OsRng;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use signature::{Signature, Signer, Verifier};
+use signature::{Signer, Verifier};
 
-pub use ed25519_dalek::{Keypair, PublicKey, SecretKey, Signature as ECSignature};
+pub use ed25519_dalek::{Keypair, PublicKey, Signature};
 
-/// What type of error was encountered. `Auth` means that the token signature failed validation.
+#[async_trait]
+pub trait Resolve
+where
+    <Self::Host as FromStr>::Err: fmt::Display,
+{
+    type Host: FromStr + Send + Sync;
+    type ActorId: DeserializeOwned + PartialEq + Send + Sync;
+    type Claims: DeserializeOwned + Send + Sync;
+
+    async fn resolve(
+        &self,
+        host: &Self::Host,
+        actor_id: &Self::ActorId,
+    ) -> std::result::Result<Actor<Self::ActorId>, Error>;
+
+    async fn validate(
+        &self,
+        encoded: &str,
+    ) -> std::result::Result<Token<Self::ActorId, Self::Claims>, Error> {
+        let mut encoded: Vec<&str> = encoded.split('.').collect();
+        if encoded.len() != 3 {
+            return Err(Error::new(
+                ErrorKind::Format,
+                "Expected bearer token in the format '<header>.<claims>.<data>'",
+            ));
+        }
+
+        let message = format!("{}.{}", encoded[0], encoded[1]);
+        let signature =
+            base64::decode(encoded.pop().unwrap()).map_err(|e| Error::new(ErrorKind::Base64, e))?;
+
+        let signature = signature::Signature::from_bytes(&signature)
+            .map_err(|e| Error::new(ErrorKind::Auth, e))?;
+
+        let token = encoded.pop().unwrap();
+        let token = base64::decode(token).map_err(|e| Error::new(ErrorKind::Base64, e))?;
+        let token: Token<Self::ActorId, Self::Claims> =
+            serde_json::from_slice(&token).map_err(|e| Error::new(ErrorKind::Json, e))?;
+
+        let host = token
+            .iss
+            .parse()
+            .map_err(|e| Error::new(ErrorKind::Format, e))?;
+        let actor = self.resolve(&host, &token.actor_id).await?;
+
+        if token.actor_id != actor.id {
+            return Err(Error::new(
+                ErrorKind::Auth,
+                "Attempted to use a bearer token for a different actor",
+            ));
+        }
+
+        let header = encoded.pop().unwrap();
+        let header = base64::decode(header).map_err(|e| Error::new(ErrorKind::Base64, e))?;
+        let header: TokenHeader =
+            serde_json::from_slice(&header).map_err(|e| Error::new(ErrorKind::Json, e))?;
+
+        if header != TokenHeader::default() {
+            Err(Error::new(
+                ErrorKind::Format,
+                "Unsupported bearer token type",
+            ))
+        } else if actor
+            .public_key()
+            .verify(message.as_bytes(), &signature)
+            .is_err()
+        {
+            Err(Error::new(ErrorKind::Auth, "Invalid bearer token"))
+        } else {
+            Ok(token)
+        }
+    }
+}
+
+/// The type of error encountered.
+/// `Auth` means that the token signature failed validation.
+/// `Fetch` means that there was an error fetching the public key of the actor to validate.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum ErrorKind {
     Base64,
+    Fetch,
     Format,
     Json,
     Auth,
@@ -56,6 +159,7 @@ impl fmt::Display for ErrorKind {
         f.write_str(match self {
             Self::Auth => "authentication",
             Self::Base64 => "base64 format",
+            Self::Fetch => "key fetch",
             Self::Format => "token format",
             Self::Json => "json format",
             Self::Time => "time",
@@ -70,7 +174,7 @@ pub struct Error {
 }
 
 impl Error {
-    fn new<M: fmt::Display>(kind: ErrorKind, message: M) -> Self {
+    pub fn new<M: fmt::Display>(kind: ErrorKind, message: M) -> Self {
         Self {
             kind,
             message: message.to_string(),
@@ -208,6 +312,14 @@ enum Key {
 }
 
 /// An actor with an identifier of type `T` and an ECDSA keypair used to sign tokens.
+///
+/// *IMPORTANT NOTE*: for security reasons, although `Actor` implements `Clone`, a private key will
+/// NOT be cloned. For example:
+/// ```
+/// # use rjwt::Actor;
+/// let actor = Actor::<String>::new("id".to_string()); // this has a new secret key
+/// let cloned = actor.clone(); // this does NOT have a secret key, only a public key
+/// ```
 pub struct Actor<I> {
     id: I,
     key: Key,
@@ -286,57 +398,14 @@ impl<I> Actor<I> {
 
         Ok(format!("{}.{}.{}", header, claims, signature))
     }
+}
 
-    /// Decode and validate the given token string.
-    pub fn validate<C: DeserializeOwned>(&self, encoded: &str) -> Result<Token<I, C>>
-    where
-        I: Eq,
-        Token<I, C>: DeserializeOwned,
-    {
-        let mut encoded: Vec<&str> = encoded.split('.').collect();
-        if encoded.len() != 3 {
-            return Err(Error::new(
-                ErrorKind::Format,
-                "Expected bearer token in the format '<header>.<claims>.<data>'",
-            ));
-        }
-
-        let message = format!("{}.{}", encoded[0], encoded[1]);
-        let signature =
-            base64::decode(encoded.pop().unwrap()).map_err(|e| Error::new(ErrorKind::Base64, e))?;
-        let signature =
-            ECSignature::from_bytes(&signature).map_err(|e| Error::new(ErrorKind::Auth, e))?;
-
-        let token = encoded.pop().unwrap();
-        let token = base64::decode(token).map_err(|e| Error::new(ErrorKind::Base64, e))?;
-        let token: Token<I, C> =
-            serde_json::from_slice(&token).map_err(|e| Error::new(ErrorKind::Json, e))?;
-
-        if token.actor_id != self.id {
-            return Err(Error::new(
-                ErrorKind::Auth,
-                "Attempted to use a bearer token for a different actor",
-            ));
-        }
-
-        let header = encoded.pop().unwrap();
-        let header = base64::decode(header).map_err(|e| Error::new(ErrorKind::Base64, e))?;
-        let header: TokenHeader =
-            serde_json::from_slice(&header).map_err(|e| Error::new(ErrorKind::Json, e))?;
-
-        if header != TokenHeader::default() {
-            Err(Error::new(
-                ErrorKind::Format,
-                "Unsupported bearer token type",
-            ))
-        } else if self
-            .public_key()
-            .verify(message.as_bytes(), &signature)
-            .is_err()
-        {
-            Err(Error::new(ErrorKind::Auth, "Invalid bearer token"))
-        } else {
-            Ok(token)
+impl<I: Clone> Clone for Actor<I> {
+    fn clone(&self) -> Self {
+        let key = self.public_key().clone();
+        Actor {
+            key: Key::Public(key),
+            id: self.id.clone(),
         }
     }
 }

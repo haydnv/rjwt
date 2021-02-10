@@ -1,2 +1,2 @@
 # rjwt
-A Javascript Web Token library for Rust
+A recursive Javascript Web Token library for Rust
