@@ -80,61 +80,33 @@ where
         &self,
         host: &Self::Host,
         actor_id: &Self::ActorId,
-    ) -> std::result::Result<Actor<Self::ActorId>, Error>;
+    ) -> Result<Actor<Self::ActorId>>;
 
     async fn validate(
         &self,
         encoded: &str,
     ) -> std::result::Result<Token<Self::ActorId, Self::Claims>, Error> {
-        let mut encoded: Vec<&str> = encoded.split('.').collect();
-        if encoded.len() != 3 {
-            return Err(Error::new(
-                ErrorKind::Format,
-                "Expected bearer token in the format '<header>.<claims>.<data>'",
-            ));
-        }
-
-        let message = format!("{}.{}", encoded[0], encoded[1]);
-        let signature =
-            base64::decode(encoded.pop().unwrap()).map_err(|e| Error::new(ErrorKind::Base64, e))?;
-
-        let signature = signature::Signature::from_bytes(&signature)
-            .map_err(|e| Error::new(ErrorKind::Auth, e))?;
-
-        let token = encoded.pop().unwrap();
-        let token = base64::decode(token).map_err(|e| Error::new(ErrorKind::Base64, e))?;
-        let token: Token<Self::ActorId, Self::Claims> =
-            serde_json::from_slice(&token).map_err(|e| Error::new(ErrorKind::Json, e))?;
+        let (message, signature) = token_signature(encoded)?;
+        let token = decode_token(message)?;
 
         let host = token
             .iss
             .parse()
             .map_err(|e| Error::new(ErrorKind::Format, e))?;
+
         let actor = self.resolve(&host, &token.actor_id).await?;
 
-        if token.actor_id != actor.id {
-            return Err(Error::new(
-                ErrorKind::Auth,
-                "Attempted to use a bearer token for a different actor",
-            ));
-        }
-
-        let header = encoded.pop().unwrap();
-        let header = base64::decode(header).map_err(|e| Error::new(ErrorKind::Base64, e))?;
-        let header: TokenHeader =
-            serde_json::from_slice(&header).map_err(|e| Error::new(ErrorKind::Json, e))?;
-
-        if header != TokenHeader::default() {
+        if actor.id != token.actor_id {
             Err(Error::new(
-                ErrorKind::Format,
-                "Unsupported bearer token type",
+                ErrorKind::Auth,
+                "attempted to use bearer token for different actor",
             ))
         } else if actor
             .public_key()
             .verify(message.as_bytes(), &signature)
             .is_err()
         {
-            Err(Error::new(ErrorKind::Auth, "Invalid bearer token"))
+            Err(Error::new(ErrorKind::Auth, "invalid bearer token"))
         } else {
             Ok(token)
         }
@@ -425,6 +397,49 @@ impl Default for TokenHeader {
     }
 }
 
+fn token_signature(encoded: &str) -> Result<(&str, Signature)> {
+    if encoded.ends_with('.') {
+        return Err(Error::new(
+            ErrorKind::Format,
+            "encoded token cannot end with .",
+        ));
+    }
+
+    let i = encoded
+        .rfind('.')
+        .ok_or_else(|| Error::new(ErrorKind::Format, format!("invalid token: {}", encoded)))?;
+
+    let message = &encoded[..i];
+
+    let signature =
+        base64::decode(&encoded[(i + 1)..]).map_err(|e| Error::new(ErrorKind::Base64, e))?;
+
+    let signature =
+        signature::Signature::from_bytes(&signature).map_err(|e| Error::new(ErrorKind::Auth, e))?;
+
+    Ok((message, signature))
+}
+
+fn decode_token<I: DeserializeOwned, C: DeserializeOwned>(encoded: &str) -> Result<Token<I, C>> {
+    let i = encoded
+        .find('.')
+        .ok_or_else(|| Error::new(ErrorKind::Format, format!("invalid token: {}", encoded)))?;
+
+    let header = base64_decode(&encoded[..i])?;
+    let header: TokenHeader =
+        serde_json::from_slice(&header).map_err(|e| Error::new(ErrorKind::Json, e))?;
+
+    if header != TokenHeader::default() {
+        return Err(Error::new(
+            ErrorKind::Format,
+            "Unsupported bearer token type",
+        ));
+    }
+
+    let token = base64_decode(&encoded[(i + 1)..])?;
+    serde_json::from_slice(&token).map_err(|e| Error::new(ErrorKind::Json, e))
+}
+
 fn base64_decode(encoded: &str) -> Result<Vec<u8>> {
     base64::decode(encoded).map_err(|e| Error::new(ErrorKind::Base64, e))
 }
@@ -444,7 +459,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_len() {
+    fn test_format() {
         let actor = Actor::new("actor".to_string());
         let token = Token::new(
             "example.com".to_string(),
@@ -455,7 +470,10 @@ mod tests {
         );
 
         let encoded = actor.sign_token(&token).unwrap();
-        println!("{}", encoded.len());
+        let (message, _) = token_signature(&encoded).unwrap();
+        assert!(encoded.starts_with(message));
+
+        println!("length {}", encoded.len());
         assert!(encoded.len() < SIZE_LIMIT);
     }
 }
