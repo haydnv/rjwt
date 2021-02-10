@@ -1,16 +1,47 @@
+//! Provides an [`Actor`] and (de)serializable [`Token`] struct which support authenticating
+//! Javascript Web Tokens with a custom payload. See [jwt.io](http://jwt.io) for more information
+//! on the JWT spec.
+//!
+//! The provided [`Actor`] uses the
+//! [ECDSA](https://en.wikipedia.org/wiki/Elliptic_Curve_Digital_Signature_Algorithm)
+//! algorithm to sign tokens (using the [`ed25519_dalek`] crate).
+//!
+//! Example:
+//! ```
+//! use std::time::{Duration, SystemTime};
+//! use rjwt::{Actor, Token};
+//!
+//! type Claims = ();
+//!
+//! let actor1 = Actor::new("actor1".to_string());
+//! let actor2 = Actor::new("actor2".to_string());
+//!
+//! let token = Token::new(
+//!     "example.com".to_string(),
+//!     SystemTime::now(), Duration::from_secs(30),
+//!     actor1.id().to_string(),
+//!     ());
+//!
+//! let encoded = actor1.sign_token(&token).unwrap();
+//! let decoded: Token<String, Claims> = actor1.validate(&encoded).unwrap();
+//! assert_eq!(token, decoded);
+//! assert!(actor2.validate::<Claims>(&encoded).is_err());
+//! println!("encoded size is {}", encoded.len());
+//! ```
+//!
+
 use std::fmt;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand::rngs::OsRng;
-use serde::de::{DeserializeOwned, Deserializer};
-use serde::ser::Serializer;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use signature::{Signature, Signer, Verifier};
 
 pub use ed25519_dalek::{Keypair, PublicKey, SecretKey, Signature as ECSignature};
-pub use url::Url;
 
+/// What type of error was encountered. `Auth` means that the token signature failed validation.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum ErrorKind {
     Base64,
@@ -32,6 +63,7 @@ impl fmt::Display for ErrorKind {
     }
 }
 
+/// An error encountered while handling a [`Token`].
 pub struct Error {
     kind: ErrorKind,
     message: String,
@@ -45,6 +77,7 @@ impl Error {
         }
     }
 
+    /// The [`ErrorKind`] of this error.
     pub fn kind(&'_ self) -> ErrorKind {
         self.kind
     }
@@ -64,20 +97,33 @@ impl fmt::Display for Error {
     }
 }
 
+/// The result of a [`Token`] operation.
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Deserialize, Serialize)]
-pub struct Token<I, S> {
-    #[serde(deserialize_with = "deserialize_url", serialize_with = "serialize_url")]
-    iss: Url,
+pub struct Token<I, C> {
+    iss: String,
     iat: u64,
     exp: u64,
     actor_id: I,
-    custom: S,
+    custom: C,
+}
+
+impl<I: Eq, C: Eq> Eq for Token<I, C> {}
+
+impl<I: PartialEq, C: PartialEq> PartialEq for Token<I, C> {
+    fn eq(&self, other: &Self) -> bool {
+        self.iss == other.iss
+            && self.iat == other.iat
+            && self.exp == other.exp
+            && self.actor_id == other.actor_id
+            && self.custom == other.custom
+    }
 }
 
 impl<I, C> Token<I, C> {
-    pub fn new(iss: Url, iat: SystemTime, ttl: Duration, actor_id: I, claims: C) -> Self {
+    /// Create a new (unsigned) token.
+    pub fn new(iss: String, iat: SystemTime, ttl: Duration, actor_id: I, claims: C) -> Self {
         let iat = iat.duration_since(UNIX_EPOCH).unwrap();
         let exp = iat + ttl;
 
@@ -90,14 +136,19 @@ impl<I, C> Token<I, C> {
         }
     }
 
-    pub fn issuer(&'_ self) -> &'_ Url {
+    /// The claimed issuer of this token.
+    pub fn issuer(&'_ self) -> &'_ str {
         &self.iss
     }
 
+    /// The actor to whom this token claims to belong.
     pub fn actor_id(&'_ self) -> &'_ I {
         &self.actor_id
     }
 
+    /// Returns Ok(false) if the token is expired, Err if it contains nonsensical time data
+    /// (like a negative timestamp or a future issue time), or Ok(true) if the token could
+    /// be valid at the given moment.
     pub fn expired(&self, now: SystemTime) -> Result<bool> {
         let iat = UNIX_EPOCH + Duration::from_secs(self.iat);
         let exp = UNIX_EPOCH + Duration::from_secs(self.exp);
@@ -111,6 +162,7 @@ impl<I, C> Token<I, C> {
         }
     }
 
+    /// The custom claims field of this token.
     pub fn claims(&'_ self) -> &'_ C {
         &self.custom
     }
@@ -133,45 +185,100 @@ impl<I: DeserializeOwned, C: DeserializeOwned> FromStr for Token<I, C> {
     }
 }
 
-impl<I: fmt::Display, C> fmt::Display for Token<I, C> {
+impl<I: fmt::Display, C> fmt::Debug for Token<I, C> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Actor {} at host {}", self.actor_id, self.iss)
+        fmt::Display::fmt(self, f)
     }
 }
 
-pub struct Actor<I> {
-    id: I,
-    keypair: Keypair,
+impl<I: fmt::Display, C> fmt::Display for Token<I, C> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "JWT token claiming Actor {} at host {}",
+            self.actor_id, self.iss
+        )
+    }
 }
 
-impl<I: Eq + DeserializeOwned + Serialize> Actor<I> {
+enum Key {
+    Public(PublicKey),
+    Secret(Keypair),
+}
+
+/// An actor with an identifier of type `T` and an ECDSA keypair used to sign tokens.
+pub struct Actor<I> {
+    id: I,
+    key: Key,
+}
+
+impl<I> Actor<I> {
+    /// Generate a new ECDSA keypair.
     pub fn new_keypair() -> Keypair {
         let mut rng = OsRng {};
         Keypair::generate(&mut rng)
     }
 
+    /// Return an `Actor` with a newly-generated keypair.
     pub fn new(id: I) -> Self {
         Actor {
             id,
-            keypair: Self::new_keypair(),
+            key: Key::Secret(Self::new_keypair()),
         }
     }
 
-    pub fn with_keypair(id: I, keypair: Keypair) -> Self {
-        Self { id, keypair }
+    /// Return an `Actor` with the given keypair, or an error if the keypair is invalid.
+    pub fn with_keypair(id: I, public_key: &[u8], secret: &[u8]) -> Result<Self> {
+        let keypair = Keypair::from_bytes(&[secret, public_key].concat())
+            .map_err(|e| Error::new(ErrorKind::Auth, e))?;
+
+        Ok(Self {
+            id,
+            key: Key::Secret(keypair),
+        })
     }
 
+    /// Return an `Actor` with the given public key, or an error if the key is invalid.
+    pub fn with_public_key(id: I, public_key: &[u8]) -> Result<Self> {
+        let key = PublicKey::from_bytes(public_key).map_err(|e| Error::new(ErrorKind::Auth, e))?;
+        Ok(Self {
+            id,
+            key: Key::Public(key),
+        })
+    }
+
+    /// The identifier of this actor.
+    pub fn id(&'_ self) -> &'_ I {
+        &self.id
+    }
+
+    /// The public key of this actor, which a client can use to verify a signature.
     pub fn public_key(&'_ self) -> &'_ PublicKey {
-        &self.keypair.public
+        match &self.key {
+            Key::Public(public) => public,
+            Key::Secret(secret) => &secret.public,
+        }
     }
 
-    pub fn sign_token<C: Serialize>(&self, token: &Token<I, C>) -> Result<String> {
+    /// Encode and sign the given token.
+    pub fn sign_token<C: Serialize>(&self, token: &Token<I, C>) -> Result<String>
+    where
+        I: Serialize,
+    {
+        let keypair = if let Key::Secret(keypair) = &self.key {
+            keypair
+        } else {
+            return Err(Error::new(
+                ErrorKind::Auth,
+                "cannot sign a token without a private key",
+            ));
+        };
+
         let header = base64_json_encode(&TokenHeader::default())?;
         let claims = base64_json_encode(&token)?;
 
         let signature = base64::encode(
-            &self
-                .keypair
+            &keypair
                 .sign(format!("{}.{}", header, claims).as_bytes())
                 .to_bytes()[..],
         );
@@ -179,7 +286,12 @@ impl<I: Eq + DeserializeOwned + Serialize> Actor<I> {
         Ok(format!("{}.{}.{}", header, claims, signature))
     }
 
-    pub fn validate<C: DeserializeOwned>(&self, encoded: &str) -> Result<Token<I, C>> {
+    /// Decode and validate the given token string.
+    pub fn validate<C: DeserializeOwned>(&self, encoded: &str) -> Result<Token<I, C>>
+    where
+        I: Eq,
+        Token<I, C>: DeserializeOwned,
+    {
         let mut encoded: Vec<&str> = encoded.split('.').collect();
         if encoded.len() != 3 {
             return Err(Error::new(
@@ -256,11 +368,24 @@ fn base64_json_encode<T: Serialize>(data: &T) -> Result<String> {
     Ok(base64::encode(&as_str))
 }
 
-fn deserialize_url<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Url, D::Error> {
-    let as_str = String::deserialize(d)?;
-    Url::from_str(&as_str).map_err(serde::de::Error::custom)
-}
+#[cfg(test)]
+mod tests {
+    const SIZE_LIMIT: usize = 8000; // max HTTP header size
+    use super::*;
 
-fn serialize_url<S: Serializer>(url: &Url, s: S) -> std::result::Result<S::Ok, S::Error> {
-    s.serialize_str(&url.to_string())
+    #[test]
+    fn test_len() {
+        let actor = Actor::new("actor".to_string());
+        let token = Token::new(
+            "example.com".to_string(),
+            SystemTime::now(),
+            Duration::from_secs(30),
+            actor.id().to_string(),
+            (),
+        );
+
+        let encoded = actor.sign_token(&token).unwrap();
+        println!("{}", encoded.len());
+        assert!(encoded.len() < SIZE_LIMIT);
+    }
 }
