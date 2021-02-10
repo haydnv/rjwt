@@ -1,23 +1,21 @@
 [package]
 name = "rjwt"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["haydnv"]
 edition = "2018"
-description = "A generic Javascript Web Token"
+description = "A recursive Javascript Web Token"
 license = "Apache-2.0"
 repository = "http://github.com/haydnv/rjwt.git"
 
-keywords = ["oauth", "jwt", "scope"]
+keywords = ["jwt", "recursive", "oauth", "token", "scope"]
 categories = ["authentication", "web-programming"]
 
 [dependencies]
 async-trait = "0.1"
 base64 = "0.13"
 ed25519-dalek = "1.0"
+futures = "0.3"
 rand = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 signature = "1.1"
-
-[dev-dependencies]
-futures = "0.3"
