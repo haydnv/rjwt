@@ -176,14 +176,15 @@ impl fmt::Display for Error {
 /// The result of a [`Token`] operation.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// A Javascript Web Token.
-#[derive(Deserialize, Serialize)]
+/// The Javascript Web Token wire format.
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Token<I, C> {
     iss: String,
     iat: u64,
     exp: u64,
     actor_id: I,
     custom: C,
+    inherit: Vec<String>
 }
 
 impl<I: Eq, C: Eq> Eq for Token<I, C> {}
@@ -195,6 +196,7 @@ impl<I: PartialEq, C: PartialEq> PartialEq for Token<I, C> {
             && self.exp == other.exp
             && self.actor_id == other.actor_id
             && self.custom == other.custom
+            && self.inherit == other.inherit
     }
 }
 
@@ -210,6 +212,7 @@ impl<I, C> Token<I, C> {
             exp: exp.as_secs(),
             actor_id,
             custom: claims,
+            inherit: vec![]
         }
     }
 
