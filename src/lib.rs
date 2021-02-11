@@ -92,7 +92,7 @@
 //! // Then, retailer.com consumes the token (validating it in the process).
 //! let retailer_claim = String::from("Bob spent $1 on retailer.com");
 //! let (retailer_token, _) = block_on(
-//!     retailer.consume_and_sign(retail_app, retailer_claim, bobs_token, now)).unwrap();
+//!     retailer.consume_and_sign(&retail_app, retailer_claim, bobs_token, now)).unwrap();
 //!
 //! // Finally, Bob's bank validates the token to verify that the request came from Bob.
 //! let claims = block_on(bank.validate(&retailer_token, now)).unwrap();
@@ -140,7 +140,7 @@ pub trait Resolve: Send + Sync {
     /// The expiration time of the new token is set equal to its parent.
     async fn consume_and_sign(
         &self,
-        actor: Actor<Self::ActorId>,
+        actor: &Actor<Self::ActorId>,
         claims: Self::Claims,
         token: String,
         now: SystemTime,
