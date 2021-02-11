@@ -402,13 +402,17 @@ impl<I, C> Token<I, C> {
     }
 
     /// The custom claims field of this token ONLY (not any of its parents, if it has them).
-    pub fn claims(&'_ self) -> Claims<I, C> where I: Clone, C: Clone {
+    pub fn claims(&'_ self) -> Claims<I, C>
+    where
+        I: Clone,
+        C: Clone,
+    {
         Claims {
             exp: self.exp,
             host: self.iss.clone(),
             actor_id: self.actor_id.clone(),
             claims: self.custom.clone(),
-            inherit: None
+            inherit: None,
         }
     }
 }
