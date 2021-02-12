@@ -182,7 +182,7 @@ pub trait Resolve: Send + Sync {
             let (message, signature) = token_signature(encoded)?;
             let token: Token<Self::Host, Self::ActorId, Self::Claims> = decode_token(message)?;
 
-            if token.is_expired(now)? {
+            if token.is_expired(now) {
                 return Err(Error::new(ErrorKind::Time, "token is expired"));
             }
 
@@ -324,6 +324,10 @@ impl<H: PartialEq, A: PartialEq, C> Claims<H, A, C> {
         }
     }
 
+    pub fn expires(&self) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(self.exp)
+    }
+
     /// Get the most recent claim made by the specified [`Actor`].
     pub fn get(&self, host: &H, actor_id: &A) -> Option<&C> {
         if host == &self.host && actor_id == &self.actor_id {
@@ -398,17 +402,9 @@ impl<H, A, C> Token<H, A, C> {
     /// Returns `Ok(false)` if the token is expired, `Err` if it contains nonsensical time data
     /// (like a negative timestamp or a future issue time), or `Ok(true)` if the token could
     /// be valid at the given moment.
-    pub fn is_expired(&self, now: SystemTime) -> Result<bool> {
-        let iat = UNIX_EPOCH + Duration::from_secs(self.iat);
+    pub fn is_expired(&self, now: SystemTime) -> bool {
         let exp = UNIX_EPOCH + Duration::from_secs(self.exp);
-        let ttl = exp
-            .duration_since(iat)
-            .map_err(|e| Error::new(ErrorKind::Time, e))?;
-
-        match now.duration_since(iat) {
-            Ok(elapsed) => Ok(elapsed > ttl),
-            Err(cause) => Err(Error::new(ErrorKind::Time, cause)),
-        }
+        now > exp
     }
 
     /// The custom claims field of this token ONLY (not any of its parents, if it has them).
