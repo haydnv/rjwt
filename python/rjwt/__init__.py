@@ -1,1 +1,3 @@
-import rjwt.example
+import rjwt.actor
+
+from rjwt.actor import Actor

@@ -1,5 +1,5 @@
 import unittest
 
-from test_example import *
+from test_actor import *
 
 unittest.main()
