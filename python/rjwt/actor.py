@@ -1,5 +1,9 @@
-from cryptography.exceptions import InvalidSignature
+import base64
+import json
+
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from .token import Token
 
 
 class Actor(object):
@@ -21,17 +25,55 @@ class Actor(object):
             self.private_key = Ed25519PrivateKey.generate()
             self.public_key = self.private_key.public_key()
 
-        self.actor_id = actor_id
+        self.id = actor_id
 
-    def sign(self, message):
-        if self.private_key:
-            return self.private_key.sign(message)
-        else:
+    def sign_token(self, token):
+        if not self.private_key:
             raise RuntimeError(f"{self.actor_id} private key must be known in order to sign a message")
 
-    def verify(self, signature, message):
-        try:
-            self.public_key.verify(signature, message)
-            return True
-        except InvalidSignature:
-            return False
+        headers = _base64_json_encode(token.headers())
+        claims = _base64_json_encode(token.claims())
+
+        signature = self.private_key.sign(f"{headers}.{claims}".encode("ascii"))
+        signature = _base64_encode(signature)
+
+        signed = f"{headers}.{claims}.{signature}"
+        assert self.verify(signed) == token
+        return signed
+
+    def verify(self, encoded_token):
+        [headers, claims, signature] = encoded_token.split('.')
+
+        signature = _base64_decode(signature)
+
+        self.public_key.verify(signature, f"{headers}.{claims}".encode("ascii"))
+
+        headers = _base64_json_decode(headers)
+        if headers != Token.headers():
+            raise ValueError(f"unsupported token type: {headers}")
+
+        claims = _base64_json_decode(claims)
+        token = Token.with_claims(**claims)
+
+        if token.actor_id == self.id:
+            return token
+        else:
+            raise ValueError("the token passed validation but has an unexpected actor ID " +
+                             f"{token.actor_id} (expected {self.id})")
+
+
+def _base64_decode(ascii_string):
+    return base64.b64decode(ascii_string.encode("ascii"))
+
+
+def _base64_encode(data):
+    return base64.b64encode(data).decode("ascii")
+
+
+def _base64_json_encode(data):
+    return _base64_encode(json.dumps(data).encode("utf8"))
+
+
+def _base64_json_decode(ascii_string):
+    json_string = _base64_decode(ascii_string).decode("utf8")
+    return json.loads(json_string)
