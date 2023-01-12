@@ -1,5 +1,5 @@
 import unittest
 
-from .test_jwt import *
+from .test_actor import *
 
 unittest.main()

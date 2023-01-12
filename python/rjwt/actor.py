@@ -2,6 +2,7 @@ import base64
 import json
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
 
 from .token import Token
 
@@ -62,8 +63,22 @@ class Actor(object):
                              f"{token.actor_id} (expected {self.id})")
 
 
+def public_pem_encode(public_key):
+    if not hasattr(public_key, "public_bytes"):
+        raise TypeError(f"expected a public key, not {public_key}")
+
+    return public_key.public_bytes(
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        encoding=serialization.Encoding.PEM,
+    )
+
+
+def public_pem_decode(pem_string):
+    return serialization.load_pem_public_key(pem_string)
+
+
 def _base64_decode(ascii_string):
-    return base64.b64decode(ascii_string.encode("ascii"))
+    return base64.b64decode(ascii_string)
 
 
 def _base64_encode(data):
@@ -75,5 +90,5 @@ def _base64_json_encode(data):
 
 
 def _base64_json_decode(ascii_string):
-    json_string = _base64_decode(ascii_string).decode("utf8")
+    json_string = _base64_decode(ascii_string)
     return json.loads(json_string)
