@@ -29,9 +29,11 @@ class Actor(object):
 
         self._id = actor_id
 
+    @property
     def id(self):
         return self._id
 
+    @property
     def public_key(self):
         return self._public_key.public_bytes(
             encoding=serialization.Encoding.Raw,
