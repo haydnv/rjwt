@@ -10,46 +10,39 @@ class Token(object):
         }
 
     @classmethod
-    def issue(cls, actor_id, issuer, ttl=30):
+    def issue(cls, issuer, actor_id, claims, ttl=30):
         if isinstance(ttl, (int, float)):
             ttl = timedelta(seconds=ttl)
 
         issued_at = datetime.now(tz=timezone.utc)
         expires = issued_at + ttl
-        return cls(actor_id, issuer, issued_at, expires)
+        return cls(issuer, actor_id, issued_at, expires, claims)
 
     @classmethod
-    def with_claims(cls, **claims):
-        def require(claim):
-            if claim in claim:
-                return claims.pop(claim)
-            else:
-                raise ValueError(f"missing claim: {claim}")
+    def consume(cls, parent, issuer, actor_id, claims, ttl=30):
+        if isinstance(ttl, (int, float)):
+            ttl = timedelta(seconds=ttl)
 
-        iss = require("iss")
-        iat = require("iat")
-        exp = require("exp")
-        actor_id = require("actor_id")
-        custom = claims.pop("custom") if "custom" in claims else None
+        issued_at = datetime.now(tz=timezone.utc)
+        expires = issued_at + ttl
+        return cls(issuer, actor_id, issued_at, expires, claims, parent)
 
-        return cls(actor_id, iss, iat, exp, custom)
+    def __init__(self, iss, actor_id, iat, exp, custom=None, inherit=None):
+        if isinstance(iat, (int, float)):
+            iat = datetime.fromtimestamp(iat, timezone.utc)
 
-    def __init__(self, actor_id, issuer, issued_at, expires, custom=None):
-        if isinstance(issued_at, (int, float)):
-            issued_at = datetime.fromtimestamp(issued_at, timezone.utc)
+        if isinstance(exp, (int, float)):
+            exp = datetime.fromtimestamp(exp, timezone.utc)
 
-        if isinstance(expires, (int, float)):
-            expires = datetime.fromtimestamp(expires, timezone.utc)
-
-        if expires < issued_at:
-            raise ValueError(f"token cannot expire at {expires} when issued at {issued_at}")
+        if exp < iat:
+            raise ValueError(f"token cannot expire at {exp} when issued at {iat}")
 
         self.actor_id = actor_id
-        self.iss = issuer
-        self.iat = issued_at
-        self.exp = expires
+        self.iss = iss
+        self.iat = iat
+        self.exp = exp
         self.custom = custom
-        self.inherit = None
+        self.inherit = inherit
 
     def __eq__(self, other):
         return (

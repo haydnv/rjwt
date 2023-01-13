@@ -66,7 +66,7 @@ class Actor(object):
             raise ValueError(f"unsupported token type: {headers}")
 
         claims = _base64_json_decode(claims)
-        token = Token.with_claims(**claims)
+        token = Token(**claims)
 
         if token.actor_id == self._id:
             return token
