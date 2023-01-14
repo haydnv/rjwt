@@ -8,7 +8,7 @@ class TokenTests(unittest.TestCase):
     def testSignAndValidate(self):
         actor_one = rjwt.Actor("áctor १")
         actor_two = rjwt.Actor("áctor २")
-        token = rjwt.Token.issue(actor_one.id, "unit test", 30)
+        token = rjwt.Token.issue("unit test", actor_one.id, 30)
         signed = actor_one.sign_token(token)
 
         self.assertEqual(actor_one.verify(signed), token)
