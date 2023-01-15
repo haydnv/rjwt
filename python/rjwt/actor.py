@@ -1,3 +1,5 @@
+"""An :class:`Actor` with a public and (optional) private key which can sign a :class:`Token`."""
+
 import base64
 import json
 
@@ -8,6 +10,8 @@ from .token import Token
 
 
 class Actor(object):
+    """An :class:`Actor` with a public and (optional) private key which can sign a :class:`Token`."""
+
     def __init__(self, actor_id, public_key=None, private_key=None):
         if public_key:
             self._public_key = Ed25519PublicKey.from_public_bytes(public_key)
@@ -31,21 +35,27 @@ class Actor(object):
 
     @property
     def id(self):
+        """The ID of this :class:`Actor`"""
+
         return self._id
 
     @property
     def public_key(self):
+        """The public key of this :class:`Actor`"""
+
         return self._public_key.public_bytes(
             encoding=serialization.Encoding.Raw,
             format=serialization.PublicFormat.Raw
         )
 
     def sign_token(self, token):
+        """Sign and encode the given `token`"""
+
         if not self._private_key:
             raise RuntimeError(f"{self.actor_id} private key must be known in order to sign a message")
 
-        headers = _base64_json_encode(token.headers())
-        claims = _base64_json_encode(token.claims())
+        headers = _base64_json_encode(token.HEADERS)
+        claims = _base64_json_encode(token.claims)
 
         signature = self._private_key.sign(f"{headers}.{claims}".encode("ascii"))
         signature = _base64_encode(signature)
@@ -55,6 +65,8 @@ class Actor(object):
         return signed
 
     def verify(self, encoded_token):
+        """Decode the given `encoded_token` and verify that it was signed by this :class:`Actor`."""
+
         [headers, claims, signature] = encoded_token.split('.')
 
         signature = _base64_decode(signature)
@@ -62,7 +74,7 @@ class Actor(object):
         self._public_key.verify(signature, f"{headers}.{claims}".encode("ascii"))
 
         headers = _base64_json_decode(headers)
-        if headers != Token.headers():
+        if headers != Token.HEADERS:
             raise ValueError(f"unsupported token type: {headers}")
 
         claims = _base64_json_decode(claims)

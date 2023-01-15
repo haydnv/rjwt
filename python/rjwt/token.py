@@ -1,16 +1,20 @@
+"""A recursive Javascript Web :class:`Token`"""
+
 from datetime import datetime, timedelta, timezone
 
 
 class Token(object):
-    @staticmethod
-    def headers():
-        return {
-            "alg": "ES256",
-            "typ": "JWT",
-        }
+    """A recursive Javascript Web :class:`Token`"""
+
+    HEADERS = {
+        "alg": "ES256",
+        "typ": "JWT",
+    }
 
     @classmethod
     def issue(cls, issuer, actor_id, claims, ttl=30):
+        """Issue a new :class:`Token` at the current system time with the given `claims`"""
+
         if isinstance(ttl, (int, float)):
             ttl = timedelta(seconds=ttl)
 
@@ -20,6 +24,8 @@ class Token(object):
 
     @classmethod
     def consume(cls, parent, issuer, actor_id, claims, ttl=30):
+        """Consume a signed `parent` :class:`Token` and issue a new child :class:`Token` containing it"""
+
         if isinstance(ttl, (int, float)):
             ttl = timedelta(seconds=ttl)
 
@@ -52,7 +58,10 @@ class Token(object):
             self.custom == other.custom,
             self.inherit == other.inherit)
 
+    @property
     def claims(self):
+        """The `claims` made by this :class:`Token`"""
+
         claims = {
             "iss": self.iss,
             "iat": int(self.iat.timestamp()),
