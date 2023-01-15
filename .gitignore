@@ -17,3 +17,4 @@ rust/**/*.rs.bk
 
 # Python build files
 **/*.egg-info
+**/_build
