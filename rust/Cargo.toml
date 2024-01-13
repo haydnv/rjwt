@@ -12,5 +12,7 @@ categories = ["authentication", "web-programming"]
 
 [dependencies]
 base64 = "0.21"
-ed25519-dalek = "2.1"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 signature = "2.2"
+serde = { version = "1.0", features = ["derive"] }
+rand = "0.8"
