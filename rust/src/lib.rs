@@ -16,16 +16,19 @@
 //! # use std::collections::HashMap;
 //! # use std::time::{Duration, SystemTime};
 //! # use async_trait::async_trait;
+//! # use futures::executor::block_on;
 //! use rjwt::*;
 //!
+//! #[derive(Clone)]
 //! struct Resolver {
 //!     hostname: String,
 //!     actors: HashMap<String, Actor<String>>,
+//!     peers: Vec<Self>,
 //! }
 //! // ...
 //! # impl Resolver {
-//! #    fn new<A: IntoIterator<Item = Actor<String>>>(hostname: String, actors: A) -> Self {
-//! #        Self { hostname, actors: actors.into_iter().map(|a| (a.id().clone(), a)).collect() }
+//! #    fn new<A: IntoIterator<Item = Actor<String>>>(hostname: String, actors: A, peers: Vec<Self>) -> Self {
+//! #        Self { hostname, actors: actors.into_iter().map(|a| (a.id().clone(), a)).collect(), peers }
 //! #    }
 //! # }
 //!
@@ -33,12 +36,15 @@
 //! impl Resolve for Resolver {
 //!     type HostId = String;
 //!     type ActorId = String;
+//!     type Claims = String;
 //!
 //!     async fn resolve(&self, host: &Self::HostId, actor_id: &Self::ActorId) -> Result<Actor<Self::ActorId>, Error> {
 //!         if host == &self.hostname {
 //!             self.actors.get(actor_id).cloned().ok_or_else(|| Error::not_found(actor_id))
+//!         } else if let Some(peer) = self.peers.iter().filter(|p| &p.hostname == host).next() {
+//!             peer.resolve(host, actor_id).await
 //!         } else {
-//!             Err(Error::not_found(actor_id))
+//!             Err(Error::not_found(host))
 //!         }
 //!     }
 //! }
@@ -50,15 +56,15 @@
 //! let example_dot_com = "example.com".to_string();
 //!
 //! let actor_bob = Actor::new(bobs_id.clone());
-//! let example = Resolver::new(example_dot_com.clone(), [actor_bob.clone()]);
+//! let example = Resolver::new(example_dot_com.clone(), [actor_bob.clone()], vec![]);
 //!
 //! // Bob makes a request through the retailer.com app.
 //! let retail_app = Actor::new("app".to_string());
-//! let retailer = Resolver::new("retailer.com".to_string(), [retail_app.clone()]);
+//! let retailer = Resolver::new("retailer.com".to_string(), [retail_app.clone()], vec![example.clone()]);
 //!
 //! // The retailer.com app makes a request to Bob's bank.
 //! let bank_account = Actor::new("bank".to_string());
-//! let bank = Resolver::new("bank.com".to_string(), [bank_account.clone()]);
+//! let bank = Resolver::new("bank.com".to_string(), [bank_account.clone()], vec![example, retailer.clone()]);
 //!
 //! // First, example.com issues a token to authenticate Bob.
 //! let bobs_claim = String::from("I am Bob and retailer.com may debit my bank.com account");
@@ -69,26 +75,49 @@
 //!     actor_bob.id().to_string(),
 //!     bobs_claim);
 //!
-//! let bobs_token = actor_bob.sign_token(&bobs_token).expect("token");
+//! let bobs_token_signed = actor_bob.sign_token(&bobs_token).expect("signed token");
 //!
+//! // Then, retailer.com validates the token
+//! let claims = block_on(retailer.validate(&bobs_token_signed, now)).expect("claims");
+//! assert!(claims.get(&example_dot_com, &bobs_id).expect("claim").starts_with("I am Bob"));
+//!
+//! let retailer_claim = String::from("Bob spent $1 on retailer.com");
+//! let retailer_token = Token::consume(
+//!         bobs_token_signed,
+//!         now,
+//!         Duration::from_secs(3),
+//!         "retailer.com".to_string(),
+//!         "app".to_string(),
+//!         retailer_claim
+//!     ).expect("token");
+//!
+//! let retailer_token = retail_app.sign_token(&retailer_token).expect("signed token");
+//!
+//! // Finally, Bob's bank validates the token to verify that the request came from Bob.
+//! let claims = block_on(bank.validate(&retailer_token, now)).expect("claims");
+//! assert!(claims.get(&example_dot_com, &bobs_id).unwrap().starts_with("I am Bob"));
 //! ```
 
 use std::fmt;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::prelude::*;
+use base64::DecodeError;
 use rand::rngs::OsRng;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-pub use ed25519_dalek::{SignatureError, Signer, SigningKey, VerifyingKey};
+pub use ed25519_dalek::{Signature, SignatureError, Signer, SigningKey, Verifier, VerifyingKey};
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ErrorKind {
     Auth,
+    Base64,
+    Format,
     Json,
     NotFound,
+    Time,
 }
 
 #[derive(Debug)]
@@ -98,18 +127,20 @@ pub struct Error {
 }
 
 impl Error {
+    pub fn new(kind: ErrorKind, message: String) -> Self {
+        Self { kind, message }
+    }
+
     pub fn auth<M: fmt::Display>(message: M) -> Self {
-        Self {
-            kind: ErrorKind::Auth,
-            message: message.to_string(),
-        }
+        Self::new(ErrorKind::Auth, message.to_string())
+    }
+
+    pub fn format<M: fmt::Display>(cause: M) -> Self {
+        Self::new(ErrorKind::Format, cause.to_string())
     }
 
     pub fn not_found<Info: fmt::Debug>(info: Info) -> Self {
-        Self {
-            kind: ErrorKind::NotFound,
-            message: format!("{info:?}"),
-        }
+        Self::new(ErrorKind::NotFound, format!("{info:?}"))
     }
 }
 
@@ -121,21 +152,27 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl From<base64::DecodeError> for Error {
+    fn from(cause: DecodeError) -> Self {
+        Self::new(ErrorKind::Base64, cause.to_string())
+    }
+}
+
 impl From<serde_json::Error> for Error {
     fn from(cause: serde_json::Error) -> Self {
-        Self {
-            kind: ErrorKind::Json,
-            message: cause.to_string(),
-        }
+        Self::new(ErrorKind::Json, cause.to_string())
     }
 }
 
 impl From<SignatureError> for Error {
     fn from(cause: SignatureError) -> Self {
-        Self {
-            kind: ErrorKind::Auth,
-            message: cause.to_string(),
-        }
+        Self::new(ErrorKind::Auth, cause.to_string())
+    }
+}
+
+impl From<SystemTimeError> for Error {
+    fn from(cause: SystemTimeError) -> Self {
+        Self::new(ErrorKind::Time, cause.to_string())
     }
 }
 
@@ -144,6 +181,7 @@ impl From<SignatureError> for Error {
 pub trait Resolve: Send + Sync {
     type HostId: Serialize + DeserializeOwned + PartialEq + fmt::Debug + Send + Sync;
     type ActorId: Serialize + DeserializeOwned + PartialEq + fmt::Debug + Send + Sync;
+    type Claims: Serialize + DeserializeOwned + Send + Sync;
 
     /// Given a host and actor ID, return a corresponding [`Actor`].
     async fn resolve(
@@ -151,6 +189,50 @@ pub trait Resolve: Send + Sync {
         host: &Self::HostId,
         actor_id: &Self::ActorId,
     ) -> Result<Actor<Self::ActorId>, Error>;
+
+    async fn validate(
+        &self,
+        encoded: &str,
+        now: SystemTime,
+    ) -> Result<Claims<Self::HostId, Self::ActorId, Self::Claims>, Error> {
+        let (message, signature) = token_signature(encoded)?;
+        let token: Token<Self::HostId, Self::ActorId, Self::Claims> = decode_token(message)?;
+
+        if token.is_expired(now) {
+            return Err(Error::new(ErrorKind::Time, "token is expired".into()));
+        }
+
+        let actor = self.resolve(&token.iss, &token.actor_id).await?;
+
+        if actor.id != token.actor_id {
+            return Err(Error::auth(
+                "attempted to use a bearer token for a different actor",
+            ));
+        }
+
+        if let Err(cause) = actor.public_key().verify(message.as_bytes(), &signature) {
+            return Err(Error::auth(format!("invalid bearer token: {cause}")));
+        }
+
+        if let Some(parent) = token.inherit {
+            let parent_claims = self.validate(&parent, now).await?;
+
+            Ok(Claims::consume(
+                token.exp,
+                token.iss,
+                token.actor_id,
+                token.custom,
+                parent_claims,
+            ))
+        } else {
+            Ok(Claims::new(
+                token.exp,
+                token.iss,
+                token.actor_id,
+                token.custom,
+            ))
+        }
+    }
 }
 
 /// An actor with an identifier of type `T` and an ECDSA keypair used to sign tokens.
@@ -214,7 +296,7 @@ impl<A> Actor<A> {
         &self.public_key
     }
 
-    /// Encode and sign the given token.
+    /// Encode and sign the given `token`.
     pub fn sign_token<H, C>(&self, token: &Token<H, A, C>) -> Result<String, Error>
     where
         H: Serialize,
@@ -246,7 +328,7 @@ impl<A: Clone> Clone for Actor<A> {
     }
 }
 
-#[derive(Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Eq, PartialEq, Debug, Deserialize, Serialize)]
 struct TokenHeader {
     alg: String,
     typ: String,
@@ -257,6 +339,63 @@ impl Default for TokenHeader {
         TokenHeader {
             alg: "ES256".into(),
             typ: "JWT".into(),
+        }
+    }
+}
+
+/// All the claims of a recursive [`Token`].
+#[derive(Clone, Debug)]
+pub struct Claims<H, A, C> {
+    exp: u64,
+    host: H,
+    actor_id: A,
+    claims: C,
+    inherit: Option<Box<Claims<H, A, C>>>,
+}
+
+impl<H: PartialEq, A: PartialEq, C> Claims<H, A, C> {
+    fn new(exp: u64, host: H, actor_id: A, claims: C) -> Self {
+        Self {
+            exp,
+            host,
+            actor_id,
+            claims,
+            inherit: None,
+        }
+    }
+
+    fn consume(exp: u64, host: H, actor_id: A, claims: C, parent: Self) -> Self {
+        Self {
+            exp,
+            host,
+            actor_id,
+            claims,
+            inherit: Some(Box::new(parent)),
+        }
+    }
+
+    pub fn expires(&self) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(self.exp)
+    }
+
+    /// Get the most recent claim made by the specified [`Actor`].
+    pub fn get(&self, host: &H, actor_id: &A) -> Option<&C> {
+        if host == &self.host && actor_id == &self.actor_id {
+            Some(&self.claims)
+        } else if let Some(claims) = &self.inherit {
+            claims.get(host, actor_id)
+        } else {
+            None
+        }
+    }
+
+    pub fn iter(&self) -> Box<dyn Iterator<Item = (&H, &A, &C)> + '_> {
+        let claims = std::iter::once((&self.host, &self.actor_id, &self.claims));
+
+        if let Some(parent) = &self.inherit {
+            Box::new(claims.chain(parent.iter()))
+        } else {
+            Box::new(claims)
         }
     }
 }
@@ -288,6 +427,28 @@ impl<H, A, C> Token<H, A, C> {
         }
     }
 
+    /// Create a new (unsigned) token which inherits from an existing (signed) token.
+    pub fn consume(
+        parent: String,
+        iat: SystemTime,
+        ttl: Duration,
+        host: H,
+        actor_id: A,
+        claims: C,
+    ) -> Result<Self, Error> {
+        let iat = iat.duration_since(UNIX_EPOCH)?;
+        let exp = iat + ttl;
+
+        Ok(Self {
+            iss: host,
+            iat: iat.as_secs(),
+            exp: exp.as_secs(),
+            actor_id,
+            custom: claims,
+            inherit: Some(parent),
+        })
+    }
+
     /// The claimed issuer of this token.
     pub fn issuer(&self) -> &H {
         &self.iss
@@ -303,5 +464,75 @@ impl<H, A, C> Token<H, A, C> {
         let iat = UNIX_EPOCH + Duration::from_secs(self.iat);
         let exp = UNIX_EPOCH + Duration::from_secs(self.exp);
         now < iat || now >= exp
+    }
+}
+
+fn token_signature(encoded: &str) -> Result<(&str, Signature), Error> {
+    if encoded.ends_with('.') {
+        return Err(Error::format("encoded token cannot end with ."));
+    }
+
+    let i = encoded
+        .rfind('.')
+        .ok_or_else(|| Error::format(format!("invalid token: {}", encoded)))?;
+
+    let message = &encoded[..i];
+
+    let signature = BASE64_STANDARD
+        .decode(&encoded[(i + 1)..])
+        .map_err(|e| Error::new(ErrorKind::Base64, e.to_string()))?;
+
+    let signature = Signature::try_from(&signature[..])?;
+
+    Ok((message, signature))
+}
+
+fn decode_token<H, A, C>(encoded: &str) -> Result<Token<H, A, C>, Error>
+where
+    H: DeserializeOwned,
+    A: DeserializeOwned,
+    C: DeserializeOwned,
+{
+    let i = encoded
+        .find('.')
+        .ok_or_else(|| Error::format(format!("invalid token: {}", encoded)))?;
+
+    let header = BASE64_STANDARD.decode(&encoded[..i])?;
+    let header: TokenHeader = serde_json::from_slice(&header)?;
+
+    if header != TokenHeader::default() {
+        return Err(Error::format(format!(
+            "unsupported bearer token type: {header:?}"
+        )));
+    }
+
+    let token = BASE64_STANDARD.decode(&encoded[(i + 1)..])?;
+    let token = serde_json::from_slice(&token)?;
+
+    Ok(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SIZE_LIMIT: usize = 8000; // max HTTP header size
+
+    #[test]
+    fn test_format() {
+        let actor = Actor::new("actor".to_string());
+        let token = Token::new(
+            "example.com".to_string(),
+            SystemTime::now(),
+            Duration::from_secs(30),
+            actor.id().to_string(),
+            (),
+        );
+
+        let encoded = actor.sign_token(&token).unwrap();
+        let (message, _) = token_signature(&encoded).unwrap();
+
+        assert!(encoded.starts_with(message));
+        assert!(encoded.len() < SIZE_LIMIT);
     }
 }
