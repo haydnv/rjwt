@@ -51,7 +51,7 @@
 //!
 //! let now = SystemTime::now();
 //!
-//! // Say that Bob is a user at example.com
+//! // Say that Bob is a user on example.com.
 //! let bobs_id = "bob".to_string();
 //! let example_dot_com = "example.com".to_string();
 //!
@@ -60,11 +60,17 @@
 //!
 //! // Bob makes a request through the retailer.com app.
 //! let retail_app = Actor::new("app".to_string());
-//! let retailer = Resolver::new("retailer.com".to_string(), [retail_app.clone()], vec![example.clone()]);
+//! let retailer = Resolver::new(
+//!     "retailer.com".to_string(),
+//!     [retail_app.clone()],
+//!     vec![example.clone()]);
 //!
 //! // The retailer.com app makes a request to Bob's bank.
 //! let bank_account = Actor::new("bank".to_string());
-//! let bank = Resolver::new("bank.com".to_string(), [bank_account.clone()], vec![example, retailer.clone()]);
+//! let bank = Resolver::new(
+//!     "bank.com".to_string(),
+//!     [bank_account.clone()],
+//!     vec![example, retailer.clone()]);
 //!
 //! // First, example.com issues a token to authenticate Bob.
 //! let bobs_claim = String::from("I am Bob and retailer.com may debit my bank.com account");
@@ -95,7 +101,10 @@
 //!
 //! // Finally, Bob's bank validates the token to verify that the request came from Bob.
 //! let claims = block_on(bank.validate(&retailer_token, now)).expect("claims");
-//! assert!(claims.get(&example_dot_com, &bobs_id).unwrap().starts_with("I am Bob"));
+//! assert!(claims
+//!     .get(&example_dot_com, &bobs_id)
+//!     .unwrap()
+//!     .starts_with("I am Bob and retailer.com may debit my bank.com account"));
 //! ```
 
 use std::fmt;
@@ -103,15 +112,17 @@ use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::prelude::*;
-use base64::DecodeError;
+use ed25519_dalek::{SignatureError, Signer, Verifier};
 use rand::rngs::OsRng;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-pub use ed25519_dalek::{Signature, SignatureError, Signer, SigningKey, Verifier, VerifyingKey};
+pub use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 
+/// The category of error returned by a JWT operation
 #[derive(Debug, Eq, PartialEq)]
 pub enum ErrorKind {
+    /// An authentication error
     Auth,
     Base64,
     Format,
@@ -120,6 +131,7 @@ pub enum ErrorKind {
     Time,
 }
 
+/// An error returned by a JWT operation
 #[derive(Debug)]
 pub struct Error {
     kind: ErrorKind,
@@ -127,18 +139,22 @@ pub struct Error {
 }
 
 impl Error {
+    /// Construct a new [`Error`].
     pub fn new(kind: ErrorKind, message: String) -> Self {
         Self { kind, message }
     }
 
+    /// Construct a new authentication [`Error`].
     pub fn auth<M: fmt::Display>(message: M) -> Self {
         Self::new(ErrorKind::Auth, message.to_string())
     }
 
+    /// Construct a new JWT format [`Error`].
     pub fn format<M: fmt::Display>(cause: M) -> Self {
         Self::new(ErrorKind::Format, cause.to_string())
     }
 
+    /// Construct a new JWT actor retrieval [`Error`].
     pub fn not_found<Info: fmt::Debug>(info: Info) -> Self {
         Self::new(ErrorKind::NotFound, format!("{info:?}"))
     }
@@ -153,7 +169,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl From<base64::DecodeError> for Error {
-    fn from(cause: DecodeError) -> Self {
+    fn from(cause: base64::DecodeError) -> Self {
         Self::new(ErrorKind::Base64, cause.to_string())
     }
 }
@@ -176,7 +192,7 @@ impl From<SystemTimeError> for Error {
     }
 }
 
-/// Trait which defines how to fetch the [`PublicKey`] given its host and ID.
+/// Trait which defines how to fetch an [`Actor`] given its host and ID
 #[async_trait]
 pub trait Resolve: Send + Sync {
     type HostId: Serialize + DeserializeOwned + PartialEq + fmt::Debug + Send + Sync;
@@ -190,6 +206,7 @@ pub trait Resolve: Send + Sync {
         actor_id: &Self::ActorId,
     ) -> Result<Actor<Self::ActorId>, Error>;
 
+    /// Validate and return the [`Claims`] of the given `encoded` token.
     async fn validate(
         &self,
         encoded: &str,
@@ -286,12 +303,12 @@ impl<A> Actor<A> {
         })
     }
 
-    /// The identifier of this actor.
+    /// Borrow the identifier of this actor.
     pub fn id(&self) -> &A {
         &self.id
     }
 
-    /// The public key of this actor, which a client can use to verify a signature.
+    /// Borrow the public key of this actor, which a client can use to verify a signature.
     pub fn public_key(&self) -> &VerifyingKey {
         &self.public_key
     }
@@ -343,7 +360,7 @@ impl Default for TokenHeader {
     }
 }
 
-/// All the claims of a recursive [`Token`].
+/// All the claims of a recursive [`Token`]
 #[derive(Clone, Debug)]
 pub struct Claims<H, A, C> {
     exp: u64,
@@ -390,7 +407,7 @@ impl<H: PartialEq, A: PartialEq, C> Claims<H, A, C> {
     }
 }
 
-/// The JSON Web Token wire format.
+/// The JSON Web Token wire format
 #[derive(Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Token<H, A, C> {
     iss: H,
@@ -439,17 +456,17 @@ impl<H, A, C> Token<H, A, C> {
         })
     }
 
-    /// The claimed issuer of this token.
+    /// Borrow the claimed issuer of this token.
     pub fn issuer(&self) -> &H {
         &self.iss
     }
 
-    /// The actor to whom this token claims to belong.
+    /// Borrow the actor to whom this token claims to belong.
     pub fn actor_id(&self) -> &A {
         &self.actor_id
     }
 
-    /// Returns `true` if this token is expired (or not yet issued) at the given moment.
+    /// Return `true` if this token is expired (or not yet issued) at the given moment.
     pub fn is_expired(&self, now: SystemTime) -> bool {
         let iat = UNIX_EPOCH + Duration::from_secs(self.iat);
         let exp = UNIX_EPOCH + Duration::from_secs(self.exp);
