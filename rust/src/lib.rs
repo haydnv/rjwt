@@ -1,20 +1,116 @@
+//! Provides an [`Actor`] and (de)serializable [`Token`] struct which support authenticating
+//! JSON Web Tokens with a custom payload. See [jwt.io](http://jwt.io) for more information
+//! on the JWT spec.
+//!
+//! The provided [`Actor`] uses the
+//! [ECDSA](https://en.wikipedia.org/wiki/Elliptic_Curve_Digital_Signature_Algorithm)
+//! algorithm to sign tokens (using the [`ed25519_dalek`] crate).
+//!
+//! This library differs from other JWT implementations in that it allows for recursive [`Token`]s.
+//!
+//! Note that if the same `(host, actor)` pair is specified multiple times in the token chain,
+//! only the latest is returned by [`Claims::get`].
+//!
+//! Example:
+//! ```
+//! # use std::collections::HashMap;
+//! # use std::time::{Duration, SystemTime};
+//! # use async_trait::async_trait;
+//! use rjwt::*;
+//!
+//! struct Resolver {
+//!     hostname: String,
+//!     actors: HashMap<String, Actor<String>>,
+//! }
+//! // ...
+//! # impl Resolver {
+//! #    fn new<A: IntoIterator<Item = Actor<String>>>(hostname: String, actors: A) -> Self {
+//! #        Self { hostname, actors: actors.into_iter().map(|a| (a.id().clone(), a)).collect() }
+//! #    }
+//! # }
+//!
+//! #[async_trait]
+//! impl Resolve for Resolver {
+//!     type HostId = String;
+//!     type ActorId = String;
+//!
+//!     async fn resolve(&self, host: &Self::HostId, actor_id: &Self::ActorId) -> Result<Actor<Self::ActorId>, Error> {
+//!         if host == &self.hostname {
+//!             self.actors.get(actor_id).cloned().ok_or_else(|| Error::not_found(actor_id))
+//!         } else {
+//!             Err(Error::not_found(actor_id))
+//!         }
+//!     }
+//! }
+//!
+//! let now = SystemTime::now();
+//!
+//! // Say that Bob is a user at example.com
+//! let bobs_id = "bob".to_string();
+//! let example_dot_com = "example.com".to_string();
+//!
+//! let actor_bob = Actor::new(bobs_id.clone());
+//! let example = Resolver::new(example_dot_com.clone(), [actor_bob.clone()]);
+//!
+//! // Bob makes a request through the retailer.com app.
+//! let retail_app = Actor::new("app".to_string());
+//! let retailer = Resolver::new("retailer.com".to_string(), [retail_app.clone()]);
+//!
+//! // The retailer.com app makes a request to Bob's bank.
+//! let bank_account = Actor::new("bank".to_string());
+//! let bank = Resolver::new("bank.com".to_string(), [bank_account.clone()]);
+//!
+//! // First, example.com issues a token to authenticate Bob.
+//! let bobs_claim = String::from("I am Bob and retailer.com may debit my bank.com account");
+//! let bobs_token = Token::new(
+//!     example_dot_com.clone(),
+//!     now,
+//!     Duration::from_secs(30),
+//!     actor_bob.id().to_string(),
+//!     bobs_claim);
+//!
+//! let bobs_token = actor_bob.sign_token(&bobs_token).expect("token");
+//!
+//! ```
+
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ed25519_dalek::{SignatureError, SigningKey, VerifyingKey};
+use async_trait::async_trait;
+use base64::prelude::*;
 use rand::rngs::OsRng;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+pub use ed25519_dalek::{SignatureError, Signer, SigningKey, VerifyingKey};
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ErrorKind {
     Auth,
     Json,
+    NotFound,
 }
 
 #[derive(Debug)]
 pub struct Error {
     kind: ErrorKind,
     message: String,
+}
+
+impl Error {
+    pub fn auth<M: fmt::Display>(message: M) -> Self {
+        Self {
+            kind: ErrorKind::Auth,
+            message: message.to_string(),
+        }
+    }
+
+    pub fn not_found<Info: fmt::Debug>(info: Info) -> Self {
+        Self {
+            kind: ErrorKind::NotFound,
+            message: format!("{info:?}"),
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -25,6 +121,15 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl From<serde_json::Error> for Error {
+    fn from(cause: serde_json::Error) -> Self {
+        Self {
+            kind: ErrorKind::Json,
+            message: cause.to_string(),
+        }
+    }
+}
+
 impl From<SignatureError> for Error {
     fn from(cause: SignatureError) -> Self {
         Self {
@@ -32,6 +137,20 @@ impl From<SignatureError> for Error {
             message: cause.to_string(),
         }
     }
+}
+
+/// Trait which defines how to fetch the [`PublicKey`] given its host and ID.
+#[async_trait]
+pub trait Resolve: Send + Sync {
+    type HostId: Serialize + DeserializeOwned + PartialEq + fmt::Debug + Send + Sync;
+    type ActorId: Serialize + DeserializeOwned + PartialEq + fmt::Debug + Send + Sync;
+
+    /// Given a host and actor ID, return a corresponding [`Actor`].
+    async fn resolve(
+        &self,
+        host: &Self::HostId,
+        actor_id: &Self::ActorId,
+    ) -> Result<Actor<Self::ActorId>, Error>;
 }
 
 /// An actor with an identifier of type `T` and an ECDSA keypair used to sign tokens.
@@ -102,7 +221,18 @@ impl<A> Actor<A> {
         A: Serialize,
         C: Serialize,
     {
-        todo!()
+        let private_key = self
+            .private_key
+            .as_ref()
+            .ok_or_else(|| Error::auth("cannot sign a token without a private key"))?;
+
+        let header = BASE64_STANDARD.encode(serde_json::to_string(&TokenHeader::default())?);
+        let claims = BASE64_STANDARD.encode(serde_json::to_string(&token)?);
+
+        let signature = private_key.try_sign(format!("{header}.{claims}").as_bytes())?;
+        let signature = BASE64_STANDARD.encode(signature.to_bytes());
+
+        Ok(format!("{header}.{claims}.{signature}"))
     }
 }
 
@@ -112,6 +242,21 @@ impl<A: Clone> Clone for Actor<A> {
             id: self.id.clone(),
             public_key: self.public_key.clone(),
             private_key: None,
+        }
+    }
+}
+
+#[derive(Eq, PartialEq, Deserialize, Serialize)]
+struct TokenHeader {
+    alg: String,
+    typ: String,
+}
+
+impl Default for TokenHeader {
+    fn default() -> TokenHeader {
+        TokenHeader {
+            alg: "ES256".into(),
+            typ: "JWT".into(),
         }
     }
 }

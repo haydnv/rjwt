@@ -11,8 +11,10 @@ keywords = ["jwt", "recursive", "oauth", "token", "scope"]
 categories = ["authentication", "web-programming"]
 
 [dependencies]
+async-trait = "0.1"
 base64 = "0.21"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 signature = "2.2"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 rand = "0.8"
