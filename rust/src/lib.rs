@@ -388,16 +388,6 @@ impl<H: PartialEq, A: PartialEq, C> Claims<H, A, C> {
             None
         }
     }
-
-    pub fn iter(&self) -> Box<dyn Iterator<Item = (&H, &A, &C)> + '_> {
-        let claims = std::iter::once((&self.host, &self.actor_id, &self.claims));
-
-        if let Some(parent) = &self.inherit {
-            Box::new(claims.chain(parent.iter()))
-        } else {
-            Box::new(claims)
-        }
-    }
 }
 
 /// The JSON Web Token wire format.
@@ -464,6 +454,16 @@ impl<H, A, C> Token<H, A, C> {
         let iat = UNIX_EPOCH + Duration::from_secs(self.iat);
         let exp = UNIX_EPOCH + Duration::from_secs(self.exp);
         now < iat || now >= exp
+    }
+}
+
+impl<H: fmt::Display, A: fmt::Display, C> fmt::Debug for Token<H, A, C> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "JWT token claiming to authenticate actor {} at host {}",
+            self.actor_id, self.iss
+        )
     }
 }
 
