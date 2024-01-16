@@ -40,11 +40,11 @@
 //!
 //!     async fn resolve(&self, host: &Self::HostId, actor_id: &Self::ActorId) -> Result<Actor<Self::ActorId>, Error> {
 //!         if host == &self.hostname {
-//!             self.actors.get(actor_id).cloned().ok_or_else(|| Error::not_found(actor_id))
+//!             self.actors.get(actor_id).cloned().ok_or_else(|| Error::fetch(actor_id))
 //!         } else if let Some(peer) = self.peers.iter().filter(|p| &p.hostname == host).next() {
 //!             peer.resolve(host, actor_id).await
 //!         } else {
-//!             Err(Error::not_found(host))
+//!             Err(Error::fetch(host))
 //!         }
 //!     }
 //! }
@@ -120,14 +120,14 @@ use serde::{Deserialize, Serialize};
 pub use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 
 /// The category of error returned by a JWT operation
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
     /// An authentication error
     Auth,
     Base64,
+    Fetch,
     Format,
     Json,
-    NotFound,
     Time,
 }
 
@@ -144,6 +144,16 @@ impl Error {
         Self { kind, message }
     }
 
+    /// Return the [`ErrorKind`] of this [`Error`].
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+
+    /// Destructure this [`Error`] into a [`String`] error message.
+    pub fn into_message(self) -> String {
+        self.message
+    }
+
     /// Construct a new authentication [`Error`].
     pub fn auth<M: fmt::Display>(message: M) -> Self {
         Self::new(ErrorKind::Auth, message.to_string())
@@ -155,8 +165,8 @@ impl Error {
     }
 
     /// Construct a new JWT actor retrieval [`Error`].
-    pub fn not_found<Info: fmt::Debug>(info: Info) -> Self {
-        Self::new(ErrorKind::NotFound, format!("{info:?}"))
+    pub fn fetch<Info: fmt::Debug>(info: Info) -> Self {
+        Self::new(ErrorKind::Fetch, format!("{info:?}"))
     }
 }
 
@@ -234,13 +244,14 @@ pub trait Resolve: Send + Sync {
         if let Some(parent) = token.inherit {
             let parent_claims = self.validate(&parent, now).await?;
 
-            Ok(Claims::consume(
-                token.exp,
-                token.iss,
-                token.actor_id,
-                token.custom,
-                parent_claims,
-            ))
+            if token.exp <= parent_claims.exp {
+                parent_claims.consume(token.iss, token.actor_id, token.custom)
+            } else {
+                Err(Error::new(
+                    ErrorKind::Time,
+                    "cannot extend the expiration time of a recursive token".into(),
+                ))
+            }
         } else {
             Ok(Claims::new(
                 token.exp,
@@ -371,7 +382,8 @@ pub struct Claims<H, A, C> {
 }
 
 impl<H: PartialEq, A: PartialEq, C> Claims<H, A, C> {
-    fn new(exp: u64, host: H, actor_id: A, claims: C) -> Self {
+    /// Construct a new set of [`Claims`].
+    pub fn new(exp: u64, host: H, actor_id: A, claims: C) -> Self {
         Self {
             exp,
             host,
@@ -381,21 +393,38 @@ impl<H: PartialEq, A: PartialEq, C> Claims<H, A, C> {
         }
     }
 
-    fn consume(exp: u64, host: H, actor_id: A, claims: C, parent: Self) -> Self {
-        Self {
-            exp,
+    /// Construct a new set of [`Claims`] which inherits from these [`Claims`].
+    pub fn consume(self, host: H, actor_id: A, claims: C) -> Result<Self, Error> {
+        let exp = self.expires().duration_since(UNIX_EPOCH)?;
+
+        Ok(Self {
+            exp: exp.as_secs(),
             host,
             actor_id,
             claims,
-            inherit: Some(Box::new(parent)),
-        }
+            inherit: Some(Box::new(self)),
+        })
     }
 
     pub fn expires(&self) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(self.exp)
     }
 
-    /// Get the most recent claim made by the specified [`Actor`].
+    /// Get the most recent claim matching the specific `cond`ition.
+    pub fn first<Cond>(&self, cond: Cond) -> Option<(&H, &A, &C)>
+    where
+        Cond: Fn(&H, &A, &C) -> bool,
+    {
+        if (cond)(&self.host, &self.actor_id, &self.claims) {
+            Some((&self.host, &self.actor_id, &self.claims))
+        } else if let Some(parent) = self.inherit.as_ref() {
+            parent.first(cond)
+        } else {
+            None
+        }
+    }
+
+    /// Get the most recent claim made by the given `actor_id` on `host`.
     pub fn get(&self, host: &H, actor_id: &A) -> Option<&C> {
         if host == &self.host && actor_id == &self.actor_id {
             Some(&self.claims)
@@ -454,6 +483,22 @@ impl<H, A, C> Token<H, A, C> {
             custom: claims,
             inherit: Some(parent),
         })
+    }
+
+    /// The custom claims field of this token ONLY (not any of its parents, if it has them).
+    pub fn claims(&'_ self) -> Claims<H, A, C>
+    where
+        H: Clone,
+        A: Clone,
+        C: Clone,
+    {
+        Claims {
+            exp: self.exp,
+            host: self.iss.clone(),
+            actor_id: self.actor_id.clone(),
+            claims: self.custom.clone(),
+            inherit: None,
+        }
     }
 
     /// Borrow the claimed issuer of this token.
