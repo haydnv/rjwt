@@ -59,9 +59,10 @@
 //! let example = Resolver::new(example_dot_com.clone(), [actor_bob.clone()], vec![]);
 //!
 //! // Bob makes a request through the retailer.com app.
+//! let retailer_dot_com = "retailer.com".to_string();
 //! let retail_app = Actor::new("app".to_string());
 //! let retailer = Resolver::new(
-//!     "retailer.com".to_string(),
+//!     retailer_dot_com.clone(),
 //!     [retail_app.clone()],
 //!     vec![example.clone()]);
 //!
@@ -74,45 +75,55 @@
 //!
 //! // First, example.com issues a token to authenticate Bob.
 //! let bobs_claim = String::from("I am Bob and retailer.com may debit my bank.com account");
+//!
+//! // This requires constructing the token...
 //! let bobs_token = Token::new(
 //!     example_dot_com.clone(),
 //!     now,
 //!     Duration::from_secs(30),
 //!     actor_bob.id().to_string(),
-//!     bobs_claim);
+//!     bobs_claim.clone());
 //!
-//! let bobs_token_signed = actor_bob.sign_token(&bobs_token).expect("signed token");
+//! // and signing it with Bob's private key.
+//! let bobs_token = actor_bob.sign_token(bobs_token).expect("signed token");
 //!
-//! // Then, retailer.com validates the token
-//! let claims = block_on(retailer.validate(&bobs_token_signed, now)).expect("claims");
-//! assert!(claims.get(&example_dot_com, &bobs_id).expect("claim").starts_with("I am Bob"));
+//! // Then, retailer.com validates the token...
+//! let bobs_token = block_on(retailer.verify(bobs_token.into_jwt(), now)).expect("claims");
+//! assert!(bobs_token.get_claim(&example_dot_com, &bobs_id).expect("claim").starts_with("I am Bob"));
 //!
+//! // and adds its own claim, that Bob owes it $1.
 //! let retailer_claim = String::from("Bob spent $1 on retailer.com");
-//! let retailer_token = Token::consume(
-//!         bobs_token_signed,
-//!         now,
-//!         Duration::from_secs(3),
-//!         "retailer.com".to_string(),
-//!         "app".to_string(),
-//!         retailer_claim
-//!     ).expect("token");
+//! let retailer_token = retail_app.consume_and_sign(
+//!     bobs_token,
+//!     retailer_dot_com.clone(),
+//!     retailer_claim.clone(),
+//!     now).expect("signed token");
 //!
-//! let retailer_token = retail_app.sign_token(&retailer_token).expect("signed token");
+//! assert_eq!(retailer_token.get_claim(&retailer_dot_com, retail_app.id()), Some(&retailer_claim));
+//! assert_eq!(retailer_token.get_claim(&example_dot_com, actor_bob.id()), Some(&bobs_claim));
 //!
-//! // Finally, Bob's bank validates the token to verify that the request came from Bob.
-//! let claims = block_on(bank.validate(&retailer_token, now)).expect("claims");
-//! assert!(claims
-//!     .get(&example_dot_com, &bobs_id)
-//!     .unwrap()
+//! // Finally, Bob's bank verifies the token...
+//! let retailer_token_as_received = block_on(bank.verify(retailer_token.jwt().to_string(), now)).expect("claims");
+//! assert_eq!(retailer_token, retailer_token_as_received);
+//!
+//! // to authenticate that the request came from Bob...
+//! assert!(retailer_token_as_received
+//!     .get_claim(&example_dot_com, &bobs_id)
+//!     .expect("claim")
 //!     .starts_with("I am Bob and retailer.com may debit my bank.com account"));
+//!
+//! // via retailer.com.
+//! assert!(retailer_token_as_received.get_claim(&retailer_dot_com, retail_app.id()).expect("claim").starts_with("Bob spent $1"));
 //! ```
 
 use std::fmt;
+use std::pin::Pin;
 use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use base64::prelude::*;
 use ed25519_dalek::{SignatureError, Signer, Verifier};
+use futures::Future;
 use rand::rngs::OsRng;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -149,9 +160,9 @@ impl Error {
         self.kind
     }
 
-    /// Destructure this [`Error`] into a [`String`] error message.
-    pub fn into_message(self) -> String {
-        self.message
+    /// Destructure this [`Error`] into its [`ErrorKind`] and an error message [`String`].
+    pub fn into_inner(self) -> (ErrorKind, String) {
+        (self.kind, self.message)
     }
 
     /// Construct a new authentication [`Error`].
@@ -216,33 +227,56 @@ pub trait Resolve: Send + Sync {
         actor_id: &Self::ActorId,
     ) -> Result<Actor<Self::ActorId>, Error>;
 
-    /// Validate and return the [`Claims`] of the given `encoded` token.
-    async fn validate(
+    /// Decode and verify the given `encoded` token.
+    async fn verify(
         &self,
-        encoded: &str,
+        encoded: String,
         now: SystemTime,
-    ) -> Result<Claims<Self::HostId, Self::ActorId, Self::Claims>, Error> {
-        let (message, signature) = token_signature(encoded)?;
-        let token: Token<Self::HostId, Self::ActorId, Self::Claims> = decode_token(message)?;
+    ) -> Result<SignedToken<Self::HostId, Self::ActorId, Self::Claims>, Error> {
+        let claims = verify_claims(self, &encoded, now).await?;
+        Ok(SignedToken::new(claims, encoded))
+    }
+}
 
-        if token.is_expired(now) {
-            return Err(Error::new(ErrorKind::Time, "token is expired".into()));
-        }
+async fn decode_and_verify_token<R: Resolve + ?Sized>(
+    resolver: &R,
+    encoded: &str,
+    now: SystemTime,
+) -> Result<Token<R::HostId, R::ActorId, R::Claims>, Error> {
+    let (message, signature) = token_signature(encoded)?;
+    let token: Token<R::HostId, R::ActorId, R::Claims> = decode_token(message)?;
 
-        let actor = self.resolve(&token.iss, &token.actor_id).await?;
+    if token.is_expired(now) {
+        return Err(Error::new(ErrorKind::Time, "token is expired".into()));
+    }
 
-        if actor.id != token.actor_id {
-            return Err(Error::auth(
-                "attempted to use a bearer token for a different actor",
-            ));
-        }
+    let actor = resolver.resolve(&token.iss, &token.actor_id).await?;
 
-        if let Err(cause) = actor.public_key().verify(message.as_bytes(), &signature) {
-            return Err(Error::auth(format!("invalid bearer token: {cause}")));
-        }
+    if actor.id != token.actor_id {
+        return Err(Error::auth(
+            "attempted to use a bearer token for a different actor",
+        ));
+    }
+
+    if let Err(cause) = actor.public_key().verify(message.as_bytes(), &signature) {
+        Err(Error::auth(format!("invalid bearer token: {cause}")))
+    } else {
+        Ok(token)
+    }
+}
+
+fn verify_claims<'a, R: Resolve + ?Sized>(
+    resolver: &'a R,
+    encoded: &'a str,
+    now: SystemTime,
+) -> Pin<
+    Box<dyn Future<Output = Result<Claims<R::HostId, R::ActorId, R::Claims>, Error>> + Send + 'a>,
+> {
+    Box::pin(async move {
+        let token = decode_and_verify_token(resolver, encoded, now).await?;
 
         if let Some(parent) = token.inherit {
-            let parent_claims = self.validate(&parent, now).await?;
+            let parent_claims = verify_claims(resolver, &parent, now).await?;
 
             if token.exp <= parent_claims.exp {
                 parent_claims.consume(token.iss, token.actor_id, token.custom)
@@ -260,7 +294,7 @@ pub trait Resolve: Send + Sync {
                 token.custom,
             ))
         }
-    }
+    })
 }
 
 /// An actor with an identifier of type `T` and an ECDSA keypair used to sign tokens.
@@ -324,8 +358,7 @@ impl<A> Actor<A> {
         &self.public_key
     }
 
-    /// Encode and sign the given `token`.
-    pub fn sign_token<H, C>(&self, token: &Token<H, A, C>) -> Result<String, Error>
+    pub fn sign_token_inner<H, C>(&self, token: &Token<H, A, C>) -> Result<String, Error>
     where
         H: Serialize,
         A: Serialize,
@@ -343,6 +376,44 @@ impl<A> Actor<A> {
         let signature = BASE64_STANDARD.encode(signature.to_bytes());
 
         Ok(format!("{header}.{claims}.{signature}"))
+    }
+
+    /// Encode and sign the given `token` data.
+    pub fn sign_token<H, C>(&self, token: Token<H, A, C>) -> Result<SignedToken<H, A, C>, Error>
+    where
+        H: Serialize,
+        A: Serialize,
+        C: Serialize,
+    {
+        let jwt = self.sign_token_inner(&token)?;
+
+        let claims = Claims {
+            exp: token.exp,
+            host: token.iss,
+            actor_id: token.actor_id,
+            claims: token.custom,
+            inherit: None,
+        };
+
+        Ok(SignedToken::new(claims, jwt))
+    }
+
+    /// Encode and sign a new token which inherits the claims of the given `token` and includes the new `claims`.
+    pub fn consume_and_sign<H, C>(
+        &self,
+        token: SignedToken<H, A, C>,
+        host_id: H,
+        claims: C,
+        now: SystemTime,
+    ) -> Result<SignedToken<H, A, C>, Error>
+    where
+        H: Serialize + Clone,
+        A: Serialize + Clone,
+        C: Serialize + Clone,
+    {
+        let (token, claims) = Token::consume(token, now, host_id.clone(), self.id.clone(), claims)?;
+        let token = self.sign_token_inner(&token)?;
+        Ok(SignedToken::new(claims, token))
     }
 }
 
@@ -371,9 +442,8 @@ impl Default for TokenHeader {
     }
 }
 
-/// All the claims of a recursive [`Token`]
-#[derive(Clone, Debug)]
-pub struct Claims<H, A, C> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Claims<H, A, C> {
     exp: u64,
     host: H,
     actor_id: A,
@@ -381,9 +451,8 @@ pub struct Claims<H, A, C> {
     inherit: Option<Box<Claims<H, A, C>>>,
 }
 
-impl<H: PartialEq, A: PartialEq, C> Claims<H, A, C> {
-    /// Construct a new set of [`Claims`].
-    pub fn new(exp: u64, host: H, actor_id: A, claims: C) -> Self {
+impl<H, A, C> Claims<H, A, C> {
+    fn new(exp: u64, host: H, actor_id: A, claims: C) -> Self {
         Self {
             exp,
             host,
@@ -393,8 +462,7 @@ impl<H: PartialEq, A: PartialEq, C> Claims<H, A, C> {
         }
     }
 
-    /// Construct a new set of [`Claims`] which inherits from these [`Claims`].
-    pub fn consume(self, host: H, actor_id: A, claims: C) -> Result<Self, Error> {
+    fn consume(self, host: H, actor_id: A, claims: C) -> Result<Self, Error> {
         let exp = self.expires().duration_since(UNIX_EPOCH)?;
 
         Ok(Self {
@@ -406,26 +474,48 @@ impl<H: PartialEq, A: PartialEq, C> Claims<H, A, C> {
         })
     }
 
-    pub fn expires(&self) -> SystemTime {
+    fn expires(&self) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(self.exp)
     }
+}
 
-    /// Get the most recent claim matching the specific `cond`ition.
-    pub fn first<Cond>(&self, cond: Cond) -> Option<(&H, &A, &C)>
+impl<H: PartialEq, A: PartialEq, C> Claims<H, A, C> {
+    fn first<Cond>(&self, cond: Cond) -> Option<(&H, &A, &C)>
     where
-        Cond: Fn(&H, &A, &C) -> bool,
+        Cond: Fn((&H, &A, &C)) -> bool,
     {
-        if (cond)(&self.host, &self.actor_id, &self.claims) {
-            Some((&self.host, &self.actor_id, &self.claims))
+        let mut first = None;
+        let mut this = Some(self);
+
+        while let Some(claims) = this {
+            let hac = (&claims.host, &claims.actor_id, &claims.claims);
+
+            if (cond)(hac) {
+                first = Some(hac);
+            }
+
+            this = self.inherit.as_ref().map(|c| &**c);
+        }
+
+        first
+    }
+
+    fn last<Cond>(&self, cond: Cond) -> Option<(&H, &A, &C)>
+    where
+        Cond: Fn((&H, &A, &C)) -> bool,
+    {
+        let claim = (&self.host, &self.actor_id, &self.claims);
+
+        if (cond)(claim) {
+            Some(claim)
         } else if let Some(parent) = self.inherit.as_ref() {
-            parent.first(cond)
+            parent.last(cond)
         } else {
             None
         }
     }
 
-    /// Get the most recent claim made by the given `actor_id` on `host`.
-    pub fn get(&self, host: &H, actor_id: &A) -> Option<&C> {
+    fn get(&self, host: &H, actor_id: &A) -> Option<&C> {
         if host == &self.host && actor_id == &self.actor_id {
             Some(&self.claims)
         } else if let Some(claims) = &self.inherit {
@@ -463,42 +553,33 @@ impl<H, A, C> Token<H, A, C> {
         }
     }
 
-    /// Create a new (unsigned) token which inherits from an existing (signed) token.
-    pub fn consume(
-        parent: String,
+    fn consume(
+        parent: SignedToken<H, A, C>,
         iat: SystemTime,
-        ttl: Duration,
-        host: H,
+        host_id: H,
         actor_id: A,
         claims: C,
-    ) -> Result<Self, Error> {
-        let iat = iat.duration_since(UNIX_EPOCH)?;
-        let exp = iat + ttl;
-
-        Ok(Self {
-            iss: host,
-            iat: iat.as_secs(),
-            exp: exp.as_secs(),
-            actor_id,
-            custom: claims,
-            inherit: Some(parent),
-        })
-    }
-
-    /// The custom claims field of this token ONLY (not any of its parents, if it has them).
-    pub fn claims(&'_ self) -> Claims<H, A, C>
+    ) -> Result<(Self, Claims<H, A, C>), Error>
     where
         H: Clone,
         A: Clone,
         C: Clone,
     {
-        Claims {
-            exp: self.exp,
-            host: self.iss.clone(),
-            actor_id: self.actor_id.clone(),
-            claims: self.custom.clone(),
-            inherit: None,
-        }
+        let iat = iat.duration_since(UNIX_EPOCH)?;
+        let exp = parent.expires().duration_since(UNIX_EPOCH)?;
+
+        let token = Self {
+            iss: host_id.clone(),
+            iat: iat.as_secs(),
+            exp: exp.as_secs(),
+            actor_id: actor_id.clone(),
+            custom: claims.clone(),
+            inherit: Some(parent.jwt),
+        };
+
+        let claims = parent.claims.consume(host_id, actor_id, claims)?;
+
+        Ok((token, claims))
     }
 
     /// Borrow the claimed issuer of this token.
@@ -526,6 +607,69 @@ impl<H: fmt::Display, A: fmt::Display, C> fmt::Debug for Token<H, A, C> {
             "JWT token claiming to authenticate actor {} at host {}",
             self.actor_id, self.iss
         )
+    }
+}
+
+/// The data of a JWT including its (inherited) claims and encoded, signed representation.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SignedToken<H, A, C> {
+    claims: Claims<H, A, C>,
+    jwt: String,
+}
+
+impl<H, A, C> SignedToken<H, A, C> {
+    fn new(data: Claims<H, A, C>, jwt: String) -> Self {
+        Self { claims: data, jwt }
+    }
+
+    /// Check the expiration time of this [`SignedToken`].
+    pub fn expires(&self) -> SystemTime {
+        self.claims.expires()
+    }
+
+    /// Borrow the latest (most recent) claim by the given `actor` on the given `host`.
+    pub fn get_claim(&self, host: &H, actor: &A) -> Option<&C>
+    where
+        H: PartialEq,
+        A: PartialEq,
+    {
+        self.claims.get(host, actor)
+    }
+
+    /// Borrow the earliest claim which matches the given `cond`ition.
+    pub fn first_claim<Cond>(&self, cond: Cond) -> Option<(&H, &A, &C)>
+    where
+        H: PartialEq,
+        A: PartialEq,
+        Cond: Fn((&H, &A, &C)) -> bool,
+    {
+        self.claims.first(cond)
+    }
+
+    /// Borrow the latest claim which matches the given `cond`ition.
+    pub fn last_claim<Cond>(&self, cond: Cond) -> Option<(&H, &A, &C)>
+    where
+        H: PartialEq,
+        A: PartialEq,
+        Cond: Fn((&H, &A, &C)) -> bool,
+    {
+        self.claims.last(cond)
+    }
+
+    /// Borrow the signed, encoded representation of this token.
+    pub fn jwt(&self) -> &str {
+        &self.jwt
+    }
+
+    /// Destructure this [`SignedToken`] into its encoded representation.
+    pub fn into_jwt(self) -> String {
+        self.jwt
+    }
+}
+
+impl<H: fmt::Debug, A: fmt::Debug, C: fmt::Debug> fmt::Debug for SignedToken<H, A, C> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "JWT {} which claims {:?}", self.jwt, self.claims)
     }
 }
 
@@ -591,10 +735,10 @@ mod tests {
             (),
         );
 
-        let encoded = actor.sign_token(&token).unwrap();
-        let (message, _) = token_signature(&encoded).unwrap();
+        let signed = actor.sign_token(token).unwrap();
+        let (message, _) = token_signature(signed.jwt()).unwrap();
 
-        assert!(encoded.starts_with(message));
-        assert!(encoded.len() < SIZE_LIMIT);
+        assert!(signed.jwt().starts_with(message));
+        assert!(signed.jwt().len() < SIZE_LIMIT);
     }
 }
