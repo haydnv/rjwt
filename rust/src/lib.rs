@@ -494,7 +494,7 @@ impl<H: PartialEq, A: PartialEq, C> Claims<H, A, C> {
                 first = Some(hac);
             }
 
-            this = self.inherit.as_ref().map(|c| &**c);
+            this = claims.inherit.as_ref().map(|c| &**c);
         }
 
         first
