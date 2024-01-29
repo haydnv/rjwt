@@ -1,9 +1,9 @@
 [package]
 name = "rjwt"
-version = "0.4.1"
-authors = ["haydnv"]
-edition = "2018"
-description = "A recursive JSON Web Token, part of Tinychain: https://git.io/JtryR"
+version = "0.5.0"
+edition = "2021"
+authors = ["code@tinychain.net"]
+description = "A recursive Javascript Web Token with support for ECDSA and Falcon"
 license = "Apache-2.0"
 repository = "https://github.com/haydnv/rjwt.git"
 
@@ -12,10 +12,13 @@ categories = ["authentication", "web-programming"]
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.13"
-ed25519-dalek = "1.0"
+base64 = "0.21"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 futures = "0.3"
-rand = "0.7"
+signature = "2.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-signature = "1.1"
+rand = "0.8"
+
+[dev-dependencies]
+futures = "0.3"
