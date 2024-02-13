@@ -89,7 +89,7 @@
 //!
 //! // Then, retailer.com validates the token...
 //! let bobs_token = block_on(retailer.verify(bobs_token.into_jwt(), now)).expect("claims");
-//! assert!(bobs_token.get_claim(&example_dot_com, &bobs_id).expect("claim").starts_with("I am Bob"));
+//! assert!(bobs_token.claims().get(&example_dot_com, &bobs_id).expect("claim").starts_with("I am Bob"));
 //!
 //! // and adds its own claim, that Bob owes it $1.
 //! let retailer_claim = String::from("Bob spent $1 on retailer.com");
@@ -99,21 +99,34 @@
 //!     retailer_claim.clone(),
 //!     now).expect("signed token");
 //!
-//! assert_eq!(retailer_token.get_claim(&retailer_dot_com, retail_app.id()), Some(&retailer_claim));
-//! assert_eq!(retailer_token.get_claim(&example_dot_com, actor_bob.id()), Some(&bobs_claim));
+//! assert_eq!(retailer_token
+//!     .claims()
+//!     .get(&retailer_dot_com, retail_app.id()), Some(&retailer_claim));
+//!
+//! assert_eq!(retailer_token
+//!     .claims()
+//!     .get(&example_dot_com, actor_bob.id()), Some(&bobs_claim));
 //!
 //! // Finally, Bob's bank verifies the token...
-//! let retailer_token_as_received = block_on(bank.verify(retailer_token.jwt().to_string(), now)).expect("claims");
+//! let retailer_token_as_received = block_on(
+//!     bank.verify(retailer_token.jwt().to_string(), now)
+//! ).expect("claims");
+//!
 //! assert_eq!(retailer_token, retailer_token_as_received);
 //!
 //! // to authenticate that the request came from Bob...
 //! assert!(retailer_token_as_received
-//!     .get_claim(&example_dot_com, &bobs_id)
+//!     .claims()
+//!     .get(&example_dot_com, &bobs_id)
 //!     .expect("claim")
 //!     .starts_with("I am Bob and retailer.com may debit my bank.com account"));
 //!
 //! // via retailer.com.
-//! assert!(retailer_token_as_received.get_claim(&retailer_dot_com, retail_app.id()).expect("claim").starts_with("Bob spent $1"));
+//! assert!(retailer_token_as_received
+//!     .claims()
+//!     .get(&retailer_dot_com, retail_app.id())
+//!     .expect("claim")
+//!     .starts_with("Bob spent $1"));
 //! ```
 
 use std::fmt;
@@ -265,13 +278,17 @@ async fn decode_and_verify_token<R: Resolve + ?Sized>(
     }
 }
 
-fn verify_claims<'a, R: Resolve + ?Sized>(
+type Verification<'a, H, A, C> =
+    Pin<Box<dyn Future<Output = Result<Claims<H, A, C>, Error>> + Send + 'a>>;
+
+fn verify_claims<'a, R>(
     resolver: &'a R,
     encoded: &'a str,
     now: SystemTime,
-) -> Pin<
-    Box<dyn Future<Output = Result<Claims<R::HostId, R::ActorId, R::Claims>, Error>> + Send + 'a>,
-> {
+) -> Verification<'a, R::HostId, R::ActorId, R::Claims>
+where
+    R: Resolve + ?Sized,
+{
     Box::pin(async move {
         let token = decode_and_verify_token(resolver, encoded, now).await?;
 
@@ -442,8 +459,9 @@ impl Default for TokenHeader {
     }
 }
 
+/// The [`Claims`] of a [`SignedToken`]
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct Claims<H, A, C> {
+pub struct Claims<H, A, C> {
     exp: u64,
     host: H,
     actor_id: A,
@@ -479,50 +497,38 @@ impl<H, A, C> Claims<H, A, C> {
     }
 }
 
+pub struct Iter<'a, H, A, C> {
+    claims: Option<&'a Claims<H, A, C>>,
+}
+
+impl<'a, H: 'a, A: 'a, C: 'a> Iterator for Iter<'a, H, A, C> {
+    type Item = (&'a H, &'a A, &'a C);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let claims = self.claims?;
+        let item = (&claims.host, &claims.actor_id, &claims.claims);
+        self.claims = claims.inherit.as_ref().map(|claims| &**claims);
+        Some(item)
+    }
+}
+
 impl<H: PartialEq, A: PartialEq, C> Claims<H, A, C> {
-    fn first<Cond>(&self, cond: Cond) -> Option<(&H, &A, &C)>
-    where
-        Cond: Fn((&H, &A, &C)) -> bool,
-    {
-        let mut first = None;
-        let mut this = Some(self);
-
-        while let Some(claims) = this {
-            let hac = (&claims.host, &claims.actor_id, &claims.claims);
-
-            if (cond)(hac) {
-                first = Some(hac);
-            }
-
-            this = claims.inherit.as_ref().map(|c| &**c);
-        }
-
-        first
+    /// Get the most recent claim made with the given `actor_id` on the given `host`, if any.
+    pub fn get(&self, host: &H, actor_id: &A) -> Option<&C> {
+        self.iter()
+            .filter_map(|(h, a, c)| {
+                if h == host && a == actor_id {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+            .next()
     }
 
-    fn last<Cond>(&self, cond: Cond) -> Option<(&H, &A, &C)>
-    where
-        Cond: Fn((&H, &A, &C)) -> bool,
-    {
-        let claim = (&self.host, &self.actor_id, &self.claims);
-
-        if (cond)(claim) {
-            Some(claim)
-        } else if let Some(parent) = self.inherit.as_ref() {
-            parent.last(cond)
-        } else {
-            None
-        }
-    }
-
-    fn get(&self, host: &H, actor_id: &A) -> Option<&C> {
-        if host == &self.host && actor_id == &self.actor_id {
-            Some(&self.claims)
-        } else if let Some(claims) = &self.inherit {
-            claims.get(host, actor_id)
-        } else {
-            None
-        }
+    /// Construct an iterator through this chain of claims, beginning with the most recent.
+    pub fn iter(&self) -> Iter<H, A, C> {
+        Iter { claims: Some(self) }
     }
 }
 
@@ -622,38 +628,14 @@ impl<H, A, C> SignedToken<H, A, C> {
         Self { claims: data, jwt }
     }
 
+    /// Borrow the [`Claims`] of this [`SignedToken`].
+    pub fn claims(&self) -> &Claims<H, A, C> {
+        &self.claims
+    }
+
     /// Check the expiration time of this [`SignedToken`].
     pub fn expires(&self) -> SystemTime {
         self.claims.expires()
-    }
-
-    /// Borrow the latest (most recent) claim by the given `actor` on the given `host`.
-    pub fn get_claim(&self, host: &H, actor: &A) -> Option<&C>
-    where
-        H: PartialEq,
-        A: PartialEq,
-    {
-        self.claims.get(host, actor)
-    }
-
-    /// Borrow the earliest claim which matches the given `cond`ition.
-    pub fn first_claim<Cond>(&self, cond: Cond) -> Option<(&H, &A, &C)>
-    where
-        H: PartialEq,
-        A: PartialEq,
-        Cond: Fn((&H, &A, &C)) -> bool,
-    {
-        self.claims.first(cond)
-    }
-
-    /// Borrow the latest claim which matches the given `cond`ition.
-    pub fn last_claim<Cond>(&self, cond: Cond) -> Option<(&H, &A, &C)>
-    where
-        H: PartialEq,
-        A: PartialEq,
-        Cond: Fn((&H, &A, &C)) -> bool,
-    {
-        self.claims.last(cond)
     }
 
     /// Borrow the signed, encoded representation of this token.
