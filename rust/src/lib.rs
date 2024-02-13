@@ -375,7 +375,7 @@ impl<A> Actor<A> {
         &self.public_key
     }
 
-    pub fn sign_token_inner<H, C>(&self, token: &Token<H, A, C>) -> Result<String, Error>
+    fn sign_token_inner<H, C>(&self, token: &Token<H, A, C>) -> Result<String, Error>
     where
         H: Serialize,
         A: Serialize,
