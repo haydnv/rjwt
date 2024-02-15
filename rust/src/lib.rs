@@ -314,6 +314,11 @@ where
     })
 }
 
+enum Key {
+    Public(VerifyingKey),
+    Private(SigningKey),
+}
+
 /// An actor with an identifier of type `T` and an ECDSA keypair used to sign tokens.
 ///
 /// *IMPORTANT NOTE*: for security reasons, although `Actor` implements `Clone`, its secret key will
@@ -325,44 +330,29 @@ where
 /// ```
 pub struct Actor<A> {
     id: A,
-    public_key: VerifyingKey,
-    private_key: Option<SigningKey>,
+    key: Key,
 }
 
 impl<A> Actor<A> {
     /// Return an `Actor` with a newly-generated keypair.
     pub fn new(id: A) -> Self {
-        let private_key = SigningKey::generate(&mut OsRng);
-        let public_key = private_key.verifying_key();
-
-        Self {
-            id,
-            public_key,
-            private_key: Some(private_key),
-        }
+        Self::with_keypair(id, SigningKey::generate(&mut OsRng))
     }
 
     /// Return an `Actor` with the given keypair, or an error if the keypair is invalid.
-    pub fn with_keypair(id: A, public_key: &[u8], secret: &[u8]) -> Result<Self, Error> {
-        let public_key = VerifyingKey::try_from(public_key)?;
-        let private_key = SigningKey::try_from(secret)?;
-
-        Ok(Self {
+    pub fn with_keypair(id: A, keypair: SigningKey) -> Self {
+        Self {
             id,
-            public_key,
-            private_key: Some(private_key),
-        })
+            key: Key::Private(keypair),
+        }
     }
 
     /// Return an `Actor` with the given public key, or an error if the key is invalid.
-    pub fn with_public_key(id: A, public_key: &[u8]) -> Result<Self, Error> {
-        let public_key = VerifyingKey::try_from(public_key)?;
-
-        Ok(Self {
+    pub fn with_public_key(id: A, public_key: VerifyingKey) -> Self {
+        Self {
             id,
-            public_key,
-            private_key: None,
-        })
+            key: Key::Public(public_key),
+        }
     }
 
     /// Borrow the identifier of this actor.
@@ -371,8 +361,11 @@ impl<A> Actor<A> {
     }
 
     /// Borrow the public key of this actor, which a client can use to verify a signature.
-    pub fn public_key(&self) -> &VerifyingKey {
-        &self.public_key
+    pub fn public_key(&self) -> VerifyingKey {
+        match &self.key {
+            Key::Public(public_key) => *public_key,
+            Key::Private(keypair) => keypair.verifying_key(),
+        }
     }
 
     fn sign_token_inner<H, C>(&self, token: &Token<H, A, C>) -> Result<String, Error>
@@ -381,15 +374,15 @@ impl<A> Actor<A> {
         A: Serialize,
         C: Serialize,
     {
-        let private_key = self
-            .private_key
-            .as_ref()
-            .ok_or_else(|| Error::auth("cannot sign a token without a private key"))?;
+        let keypair = match &self.key {
+            Key::Private(keypair) => Ok(keypair),
+            Key::Public(_) => Err(Error::auth("cannot sign a token without a private key")),
+        }?;
 
         let header = BASE64_STANDARD.encode(serde_json::to_string(&TokenHeader::default())?);
         let claims = BASE64_STANDARD.encode(serde_json::to_string(&token)?);
 
-        let signature = private_key.try_sign(format!("{header}.{claims}").as_bytes())?;
+        let signature = keypair.try_sign(format!("{header}.{claims}").as_bytes())?;
         let signature = BASE64_STANDARD.encode(signature.to_bytes());
 
         Ok(format!("{header}.{claims}.{signature}"))
@@ -438,8 +431,10 @@ impl<A: Clone> Clone for Actor<A> {
     fn clone(&self) -> Self {
         Actor {
             id: self.id.clone(),
-            public_key: self.public_key.clone(),
-            private_key: None,
+            key: match &self.key {
+                Key::Public(public_key) => Key::Public(*public_key),
+                Key::Private(keypair) => Key::Public(keypair.verifying_key()),
+            },
         }
     }
 }
