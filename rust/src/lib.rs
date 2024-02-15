@@ -137,11 +137,11 @@ use async_trait::async_trait;
 use base64::prelude::*;
 use ed25519_dalek::{SignatureError, Signer, Verifier};
 use futures::Future;
-use rand::rngs::OsRng;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
+pub use rand::rngs::OsRng;
 
 /// The category of error returned by a JWT operation
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
