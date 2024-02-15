@@ -444,6 +444,12 @@ impl<A: Clone> Clone for Actor<A> {
     }
 }
 
+impl<A: fmt::Debug> fmt::Debug for Actor<A> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "actor {:?}", self.id)
+    }
+}
+
 #[derive(Eq, PartialEq, Debug, Deserialize, Serialize)]
 struct TokenHeader {
     alg: String,
