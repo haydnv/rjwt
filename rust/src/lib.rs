@@ -513,6 +513,12 @@ impl<'a, H: 'a, A: 'a, C: 'a> Iterator for Iter<'a, H, A, C> {
     }
 }
 
+impl<H, A, C> Claims<H, A, C> {
+    pub fn iter(&self) -> Iter<H, A, C> {
+        Iter { claims: Some(self) }
+    }
+}
+
 impl<H: PartialEq, A: PartialEq, C> Claims<H, A, C> {
     /// Get the most recent claim made with the given `actor_id` on the given `host`, if any.
     pub fn get(&self, host: &H, actor_id: &A) -> Option<&C> {
@@ -526,10 +532,14 @@ impl<H: PartialEq, A: PartialEq, C> Claims<H, A, C> {
             })
             .next()
     }
+}
 
-    /// Construct an iterator through this chain of claims, beginning with the most recent.
-    pub fn iter(&self) -> Iter<H, A, C> {
-        Iter { claims: Some(self) }
+impl<'a, H, A, C> IntoIterator for &'a Claims<H, A, C> {
+    type Item = (&'a H, &'a A, &'a C);
+    type IntoIter = Iter<'a, H, A, C>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
