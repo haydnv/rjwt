@@ -319,6 +319,15 @@ enum Key {
     Private(SigningKey),
 }
 
+impl Key {
+    fn has_private_key(&self) -> bool {
+        match &self {
+            Self::Public(_) => false,
+            Self::Private(_) => true,
+        }
+    }
+}
+
 /// An actor with an identifier of type `T` and an ECDSA keypair used to sign tokens.
 ///
 /// *IMPORTANT NOTE*: for security reasons, although `Actor` implements `Clone`, its secret key will
@@ -358,6 +367,11 @@ impl<A> Actor<A> {
     /// Borrow the identifier of this actor.
     pub fn id(&self) -> &A {
         &self.id
+    }
+
+    /// Return `true` if this [`Actor`] has a private key which can be used to sign [`Token`]s.
+    pub fn has_private_key(&self) -> bool {
+        self.key.has_private_key()
     }
 
     /// Borrow the public key of this actor, which a client can use to verify a signature.
