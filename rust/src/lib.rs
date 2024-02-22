@@ -229,8 +229,8 @@ impl From<SystemTimeError> for Error {
 /// Trait which defines how to fetch an [`Actor`] given its host and ID
 #[async_trait]
 pub trait Resolve: Send + Sync {
-    type HostId: Serialize + DeserializeOwned + PartialEq + fmt::Debug + Send + Sync;
-    type ActorId: Serialize + DeserializeOwned + PartialEq + fmt::Debug + Send + Sync;
+    type HostId: Serialize + DeserializeOwned + fmt::Debug + Send + Sync;
+    type ActorId: Serialize + DeserializeOwned + fmt::Debug + Send + Sync;
     type Claims: Serialize + DeserializeOwned + Send + Sync;
 
     /// Given a host and actor ID, return a corresponding [`Actor`].
@@ -245,7 +245,10 @@ pub trait Resolve: Send + Sync {
         &self,
         encoded: String,
         now: SystemTime,
-    ) -> Result<SignedToken<Self::HostId, Self::ActorId, Self::Claims>, Error> {
+    ) -> Result<SignedToken<Self::HostId, Self::ActorId, Self::Claims>, Error>
+    where
+        Self::ActorId: PartialEq,
+    {
         let claims = verify_claims(self, &encoded, now).await?;
         Ok(SignedToken::new(claims, encoded))
     }
@@ -255,7 +258,10 @@ async fn decode_and_verify_token<R: Resolve + ?Sized>(
     resolver: &R,
     encoded: &str,
     now: SystemTime,
-) -> Result<Token<R::HostId, R::ActorId, R::Claims>, Error> {
+) -> Result<Token<R::HostId, R::ActorId, R::Claims>, Error>
+where
+    R::ActorId: PartialEq,
+{
     let (message, signature) = token_signature(encoded)?;
     let token: Token<R::HostId, R::ActorId, R::Claims> = decode_token(message)?;
 
@@ -288,6 +294,7 @@ fn verify_claims<'a, R>(
 ) -> Verification<'a, R::HostId, R::ActorId, R::Claims>
 where
     R: Resolve + ?Sized,
+    R::ActorId: PartialEq,
 {
     Box::pin(async move {
         let token = decode_and_verify_token(resolver, encoded, now).await?;
