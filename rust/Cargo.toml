@@ -1,9 +1,9 @@
 [package]
 name = "rjwt"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 authors = ["code@tinychain.net"]
-description = "A recursive Javascript Web Token with support for ECDSA and Falcon"
+description = "A recursive Javascript Web Token with support for ECDSA"
 license = "Apache-2.0"
 repository = "https://github.com/haydnv/rjwt.git"
 
@@ -12,7 +12,7 @@ categories = ["authentication", "web-programming"]
 
 [dependencies]
 async-trait = "0.1"
-base64 = "0.21"
+base64 = "0.22"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 futures = "0.3"
 signature = "2.2"
