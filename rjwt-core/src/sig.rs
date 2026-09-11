@@ -22,8 +22,10 @@ use ed25519::Ed25519VerifyingKey;
 use falcon::Falcon512PublicKey;
 #[cfg(feature = "falcon")]
 use falcon::Falcon512Signature;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AlgKind {
     Ed25519,
     #[cfg(feature = "falcon")]
@@ -31,6 +33,14 @@ pub enum AlgKind {
 }
 
 impl AlgKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ed25519 => "ed25519",
+            #[cfg(feature = "falcon")]
+            Self::Falcon512 => "falcon512",
+        }
+    }
+
     pub(crate) fn jwt_name(self) -> &'static str {
         match self {
             Self::Ed25519 => "EdDSA",
@@ -45,6 +55,27 @@ impl AlgKind {
             #[cfg(feature = "falcon")]
             "FN-DSA-512" => Ok(Self::Falcon512),
             other => Err(Error::format(format!("unsupported alg: {other}"))),
+        }
+    }
+}
+
+impl std::fmt::Display for AlgKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl std::str::FromStr for AlgKind {
+    type Err = Error;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
+            "ed25519" => Ok(Self::Ed25519),
+            #[cfg(feature = "falcon")]
+            "falcon512" => Ok(Self::Falcon512),
+            other => Err(Error::format(format!(
+                "unsupported signature algorithm: {other}"
+            ))),
         }
     }
 }
@@ -254,6 +285,27 @@ impl Signature {
     fn new_falcon512(sig: Falcon512Signature) -> Self {
         Self {
             inner: SignatureTypes::Falcon512(sig),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AlgKind;
+
+    #[test]
+    fn algorithm_names_parse_and_serialize_symmetrically() {
+        #[cfg(feature = "falcon")]
+        let algorithms = [AlgKind::Ed25519, AlgKind::Falcon512];
+        #[cfg(not(feature = "falcon"))]
+        let algorithms = [AlgKind::Ed25519];
+
+        for algorithm in algorithms {
+            assert_eq!(algorithm.name().parse::<AlgKind>().unwrap(), algorithm);
+            assert_eq!(algorithm.to_string(), algorithm.name());
+            let json = serde_json::to_string(&algorithm).unwrap();
+            assert_eq!(json, format!("\"{}\"", algorithm.name()));
+            assert_eq!(serde_json::from_str::<AlgKind>(&json).unwrap(), algorithm);
         }
     }
 }
